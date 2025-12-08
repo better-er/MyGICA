@@ -1,5 +1,19 @@
 # MyGICA 使用文档
 
+## 🚀 快速开始
+
+本项目已经发布至 PyPI，可以通过 pip 或兼容的工具安装：
+
+```powershell
+pip install MyGICA  # pip 安装方式
+```
+
+或者使用 uv 工具管理器安装（推荐）：
+
+```powershell
+uv tool install MyGICA    # uv 工具管理器安装方式
+```
+
 ## 📄 简介
 
 **MyGICA** (剪辑 MyGICA 视频的 MyGICA 工具, MyGICA 即 MyGO!!!!! & MUJICA) 是一个文本化、结构化的视频剪辑工具，用于盯帧剪辑
@@ -40,12 +54,12 @@ project/
 ├── 示例.MyGICA.toml        # 主配置文件（.MyGICA.toml 格式）
 ├── SC-Heavy.otf           # 字体文件（思源粗宋或其他字体）
 ├── cache_dir/             # 缓存目录（临时片段）
-├── output_dir/          # 输出目录（最终视频）
+├── output_dir/            # 输出目录（最终视频）
 └── src/
-    ├── A_compiler.py          # 编译器脚本（主逻辑）
+    ├── A_compiler.py          # 编译器脚本（主逻辑，对应 MyGICA 命令行工具）
     ├── structure.py           # 数据结构定义（用于解析 TOML，可以查看合法的定义）
-    ├── time_based_cache_cleaner.py    # 按时间管理缓存的工具（可选）
-    └── srt2MyGICA.py          # 将 SRT 转为 .MyGICA.toml 的脚本框架（可选）
+    ├── time_based_cache_cleaner.py    # 按时间管理缓存的工具（对应 MyGICA_cache_cleaner 命令行工具）
+    └── srt2MyGICA.py          # 将 SRT 转为 .MyGICA.toml 的脚本框架（对应 srt2MyGICA 命令行工具）
 ```
 
 ---
@@ -136,14 +150,21 @@ volume = -50
 
 ### 1. 准备工作
 
-安装 ffmpeg，在 powershell 运行
-> winget install Gyan.FFmpeg
+- Windows 系统 + uv 工具管理器 安装方式
 
-安装 uv，在 powershell 运行
-> winget install astral-sh.uv
+```powershell
+winget install Gyan.FFmpeg # 安装 ffmpeg 至系统 PATH
+winget install astral-sh.uv # 安装 uv 工具管理器至系统 PATH
+uv tool install MyGICA    # 安装 MyGICA 工具至系统 PATH
+```
 
-安装 MyGICA，在 powershell 运行
-> uv tool install MyGICA
+- pip 安装方式
+
+```powershell
+# 自行配置 FFmpeg 至系统 PATH
+# 自行管理 Python 环境
+pip install MyGICA
+```
 
 ### 2. 修改配置文件
 
@@ -152,7 +173,10 @@ volume = -50
 ### 3. 运行脚本
 
 编译项目，在 powershell 运行
-> MyGICA 示例.MyGICA.toml
+
+```powershell
+MyGICA 示例.MyGICA.toml
+```
 
 输出文件将保存在 `output_dir/{{project_name}}`。
 
@@ -187,10 +211,12 @@ cache_dir/
 
 ## 🧰 依赖工具
 
-- [ffmpeg](https://ffmpeg.org/)
-- Python 3.13
-- 第三方库：`dacite`
-- 自用库 `betterer`（已打包）
+- 需要配置
+    - [ffmpeg](https://ffmpeg.org/)需要安装至系统 PATH （见使用方法）
+- 无需配置
+    - Python 3.13
+    - 第三方库：`dacite`
+    - 自用库 `betterer`（已打包）
 
 ---
 

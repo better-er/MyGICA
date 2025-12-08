@@ -101,9 +101,11 @@ class TimeBasedCache:
         futures = []
 
         def task(info_: dict) -> tuple[str | None, str | None]:
-            if info_['file_path'] and Path(info_['file_path']).exists() and info_['exists']:
-                result = subprocess_run(['ffmpeg', '-hwaccel', 'cuda', '-v', 'error', '-i', info_['file_path'], '-f', 'null', '-'])
-                return result.stderr, info_['file_path']
+            if info_['file_path'] and Path(info_['file_path']).exists():
+                result = subprocess_run(['ffprobe', '-hide_banner', '-print_format', 'json', '-show_format', '-show_streams', info_['file_path']], stream_terminal=False)
+                print(f"检查文件完整性：{info_['file_path']}, 返回码：{result.returncode}, 输出：{result.stdout}, 错误：{result.stderr}")
+                if result.returncode != 0:
+                    return result.stderr, info_['file_path']
             return None, None
 
         for item, info in self.cache.items():
@@ -217,7 +219,7 @@ class TimeBasedCache:
 
 
 @click.command()
-@click.argument('cache_dir', default=Path('./cache_dir'), type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.argument('cache_dir', default=Path('cache_dir'), type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option('--days', default=30, type=float, help='清理早于多少天前的文件', show_default=True)
 @click.option('--dry-run', is_flag=True, help='仅打印将要删除的文件，而不实际删除')
 @click.option('--check-corruption', is_flag=True, help='检查缓存文件是否损坏')

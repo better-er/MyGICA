@@ -59,6 +59,8 @@ class ScriptConfig:
 # 工具函数
 # =============================
 cache_instance = TimeBasedCache.get_instance()
+
+
 def subprocess_run_cache(cmd: list[str], files: list[Path], stream_terminal: bool = True):
     """带缓存的 subprocess_run，执行命令后更新文件的时间戳"""
     subprocess_run(cmd, stream_terminal=stream_terminal)
@@ -157,6 +159,16 @@ def build_drawtext_filters(
 # =============================
 def cache_clip(cmd: list[str], files: list[Path], cache: bool = True, stream_terminal: bool = True) -> Path:
     """使用命令签名缓存剪辑，要求 cmd 最后一个参数为输出文件"""
+
+    def check(path: Path) -> bool:
+        res = subprocess_run(['ffprobe', '-hide_banner', '-print_format', 'json', '-show_format', '-show_streams', path], stream_terminal=False)
+        if res.returncode != 0:
+            return False
+        j = json.loads(res.stdout)
+        if 'streams' not in j or len(j['streams']) == 0:
+            return False
+        return True
+
     # 获取输出文件
     output_file = cmd[-1]
     output_path = Path(output_file)
@@ -168,7 +180,7 @@ def cache_clip(cmd: list[str], files: list[Path], cache: bool = True, stream_ter
             if not file.exists():
                 raise FileNotFoundError(f"剪辑时发现文件不存在：{file}")
         # 如果签名文件存在且大小大于0则跳过
-        if new_output_path.exists() and new_output_path.stat().st_size > 0:
+        if new_output_path.exists() and new_output_path.stat().st_size > 0 and check(new_output_path):
             logger.info(f"⏭️  使用缓存文件: {new_output_path}")
             return new_output_path
 
