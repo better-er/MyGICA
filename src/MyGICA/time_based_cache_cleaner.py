@@ -1,4 +1,5 @@
 import atexit
+import os
 import pickle
 import threading
 from datetime import datetime, timedelta
@@ -39,6 +40,18 @@ class TimeBasedCache:
             if cls._instance is None:
                 cls._instance = cls()
         return cls._instance
+
+    @staticmethod
+    def _key(path) -> str:
+        """把路径归一化成可比较的键，纯字符串运算，不访问文件系统"""
+        return os.path.normcase(os.path.abspath(str(path)))
+
+    @staticmethod
+    def _under(path: Path, directory: Path) -> bool:
+        """纯路径运算判断 path 是否在 directory 内，不访问文件系统"""
+        target = TimeBasedCache._key(path)
+        base = TimeBasedCache._key(directory)
+        return target == base or target.startswith(base + os.sep)
 
     def _load_cache(self) -> dict:
         """从文件加载缓存数据"""
@@ -83,14 +96,15 @@ class TimeBasedCache:
             # 立即保存缓存
             self._save_cache()
 
-    def clearcache(self, time_diff: timedelta, dry_run: bool = False, check_corruption: bool = False) -> None:
+    def clearcache(self, time_diff: timedelta, dry_run: bool = False, check_corruption: bool = False, batch: bool = False) -> None:
         """
-        清理早于指定时间差的元素及其对应的文件
+        清理早于指定时间差的记录及其对应的文件
 
         Args:
-            time_diff: 时间差对象，用于判断哪些元素需要被清理
-            dry_run: 如果为True，则只记录将要删除的元素和文件，缓存与磁盘都不改动
+            time_diff: 时间差对象，用于判断哪些记录需要被清理，batch 为 True 时不用
+            dry_run: 如果为True，则只记录将要删除的记录和文件，缓存与磁盘都不改动
             check_corruption: 如果为True，则检查缓存文件是否损坏
+            batch: 按最近一次编译的批次清理，保留登记过的文件和编译期新生成的产物，适合时间上分不出层次的缓存
         """
         current_time = datetime.now()
         items_to_remove = []
@@ -99,6 +113,16 @@ class TimeBasedCache:
         kept_size = 0
         deleted_count = 0
         deleted_size = 0
+
+        # 批次模式不看天数的绝对阈值，改看这次编译从什么时候开始
+        batch_start = None
+        if batch:
+            access_times = [info['last_access'] for info in self.cache.values() if info.get('file_path')]
+            if access_times:
+                batch_start = datetime.fromtimestamp(min(access_times))
+                logger.info(f"批次模式：这次编译从 {batch_start:%Y-%m-%d %H:%M:%S} 前后开始")
+            else:
+                logger.warning("批次模式：缓存索引为空，判断不出编译起点，未登记文件一律保留")
 
         pool = ThreadPoolExecutor()
         futures = []
@@ -122,23 +146,20 @@ class TimeBasedCache:
                 logger.warning(f"缓存项缺少文件路径：{item}")
                 items_to_remove.append(item)
                 continue
+            # 先按目录筛，缓存目录外的记录一律不碰，不探测、不摘记录、不动文件
             file_path = Path(info['file_path'])
+            if self.allowed_directories and not any(self._under(file_path, d) for d in self.allowed_directories):
+                continue
+
             if not file_path.exists():
                 logger.warning(f"缓存项对应的文件不存在：{info['file_path']}")
                 items_to_remove.append(item)
                 continue
 
-            # 白名单只决定是否允许删除，过期判断独立执行，避免白名单为空时 --days 被静默忽略
-            resolved_file = file_path.resolve()
-            if self.allowed_directories and not any(
-                resolved_file.is_relative_to(d) for d in self.allowed_directories
-            ):
-                # 白名单外且不在当前目录的缓存项只从记录里移除，不动文件
-                if not resolved_file.is_relative_to(Path.cwd().resolve()):
-                    items_to_remove.append(item)
-                    logger.info(f"移除不在当前目录的缓存：{info['file_path']}")
-                continue
-            if current_time - last_access > time_diff:
+            if batch:
+                # 登记项就是这次编译读入过的文件，批次模式下整体保留
+                pass
+            elif current_time - last_access > time_diff:
                 items_to_delete.append(item)
                 continue
 
@@ -151,16 +172,19 @@ class TimeBasedCache:
         # dry_run 下缓存与磁盘都保持原样，只报告将要发生的动作
         for item in items_to_remove:
             if dry_run:
-                logger.info(f"[模拟运行] 将从缓存中移除：{item}")
+                logger.info(f"[模拟运行] 将从缓存索引中移除：{item}")
                 continue
-            # 仅从缓存中移除
+            # 只摘掉记录，这类文件本来就已经不在磁盘上了
             del self.cache[item]
-            logger.info(f"已从缓存中移除：{item}")
+            logger.info(f"已从缓存索引中移除：{item}")
 
         for item in items_to_delete:
             file_path = Path(self.cache[item]['file_path'])
             if dry_run:
-                logger.info(f"[模拟运行] 将删除文件并从缓存中移除：{file_path}")
+                if file_path.exists():
+                    deleted_count += 1
+                    deleted_size += file_path.stat().st_size
+                logger.info(f"[模拟运行] 将删除文件并从缓存索引中移除：{file_path}")
                 continue
             # 如果对应的是文件，尝试删除
             if file_path.exists():
@@ -169,31 +193,39 @@ class TimeBasedCache:
                 deleted_count += 1
                 deleted_size += file_size
                 logger.info(f"已删除文件：{file_path}")
-            # 从缓存中移除
+            # 同时摘掉缓存索引里的记录
             del self.cache[item]
-            logger.info(f"已从缓存中移除：{item}")
+            logger.info(f"已从缓存索引中移除：{item}")
 
         # 处理目录中未登记的文件，只有超过保留期限且非模拟运行才删除
         # 未登记文件没有访问记录，只能按修改时间判断；已登记项一律按 last_access 处理
-        known_paths = {Path(key).resolve() for key in self.cache}
+        known_paths = {self._key(key) for key in self.cache}
         for allowed_dir in self.allowed_directories:
             for file in allowed_dir.rglob('*'):
                 if not file.is_file():
                     continue
-                resolved = file.resolve()
-                if resolved in known_paths:
+                if self._key(file) in known_paths:
                     continue
                 mtime = datetime.fromtimestamp(file.stat().st_mtime)
-                if current_time - mtime <= time_diff:
+                if batch:
+                    # 未登记文件没有访问记录，只能按修改时间跟编译起点比
+                    expired = batch_start is not None and mtime < batch_start
+                else:
+                    expired = current_time - mtime > time_diff
+                if not expired:
+                    kept_count += 1
+                    kept_size += file.stat().st_size
                     continue
                 if dry_run:
+                    deleted_count += 1
+                    deleted_size += file.stat().st_size
                     logger.info(f"[模拟运行] 将删除未登记的过期文件：{file}")
                     continue
                 deleted_count += 1
                 deleted_size += file.stat().st_size
                 logger.info(f"删除目录中未登记的过期文件：{file}，修改时间：{mtime:%Y-%m-%d %H:%M:%S}")
                 file.unlink()
-                known_paths.discard(resolved)
+                known_paths.discard(self._key(file))
 
         logger.info(f"删除 {deleted_count} 项，释放空间 {deleted_size / (1024 * 1024):.2f} MB；保留 {kept_count} 项，占用空间 {kept_size / (1024 * 1024):.2f} MB")
 
@@ -208,22 +240,24 @@ class TimeBasedCache:
             if stderr:
                 logger.warning(f"文件可能损坏或不可用：{file_path}\n错误信息：{stderr}")
 
-        # 统计剩余缓存信息
+        # 统计剩余缓存信息，只算落在缓存目录内的记录，索引里还有源素材，算进来对不上目录真实占用
         remaining_count = len(self.cache)
+        remaining_paths = set()
         remaining_size = 0
-        seen_inodes = set()  # 存储 (device_id, inode) 元组，用于去重
         for info in self.cache.values():
             p = Path(info['file_path'])
+            if self.allowed_directories and not any(self._under(p, d) for d in self.allowed_directories):
+                continue
             if not p.exists():
                 logger.warning(f"统计缓存大小时发现文件不存在：{p}")
                 continue
-            stat_info = p.stat()
-            inode_key = (stat_info.st_dev, stat_info.st_ino)
-            if inode_key in seen_inodes:
+            # 按路径去重，同一路径只算一次，不按 inode，Windows 上 inode 会把不同文件判成同一份
+            key = self._key(p)
+            if key in remaining_paths:
                 continue
-            seen_inodes.add(inode_key)
-            remaining_size += stat_info.st_size
-        logger.info(f"剩余缓存项：{remaining_count}，剩余大小：{remaining_size / (1024 * 1024):.2f} MB")
+            remaining_paths.add(key)
+            remaining_size += p.stat().st_size
+        logger.info(f"剩余缓存记录：{remaining_count} 条，其中缓存目录内 {len(remaining_paths)} 条，合计 {remaining_size / (1024 * 1024):.2f} MB")
 
 
 
@@ -245,13 +279,14 @@ class TimeBasedCache:
 @click.command()
 @click.argument('cache_dir', default=Path('cache_dir'), type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option('--days', default=30, type=float, help='清理早于多少天前的文件', show_default=True)
+@click.option('--batch', is_flag=True, help='按最近一次编译的批次清理，保留登记过的文件和编译期新生成的产物')
 @click.option('--dry-run', is_flag=True, help='仅打印将要删除的文件，而不实际删除')
 @click.option('--check-corruption', is_flag=True, help='检查缓存文件是否损坏')
-def cli(cache_dir: Path, days: float, dry_run: bool, check_corruption: bool) -> None:
-    """命令行接口，清理指定文件夹中早于指定天数的缓存文件"""
+def cli(cache_dir: Path, days: float, batch: bool, dry_run: bool, check_corruption: bool) -> None:
+    """命令行接口，按天数或按最近一次编译的批次清理缓存文件"""
     cache = TimeBasedCache(allowed_directories=[str(cache_dir)])
-    cache.clearcache(timedelta(days=days), dry_run=dry_run, check_corruption=check_corruption)
+    cache.clearcache(timedelta(days=days), dry_run=dry_run, check_corruption=check_corruption, batch=batch)
 
 
 if __name__ == '__main__':
-    pass
+    cli()

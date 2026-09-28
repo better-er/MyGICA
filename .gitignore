@@ -20,3 +20,6 @@ cache_output/
 try/
 pic/
 project2/
+
+# 编译产物，需要留样例时用 git add -f
+output_dir/
