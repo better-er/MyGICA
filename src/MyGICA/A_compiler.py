@@ -1,7 +1,7 @@
 import hashlib
 import json
 import os
-import re
+import shutil
 import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -15,7 +15,7 @@ from PIL import Image
 from loguru import logger
 
 from .betterer import subprocess_run
-from .structure import parse_config, Range, Text, ProjectConfig
+from .structure import check, parse_config, parse_fps, Range, Text, ProjectConfig
 from .time_based_cache_cleaner import TimeBasedCache
 
 
@@ -24,19 +24,30 @@ class ScriptConfig:
     MyGICA_path: Path
     project: ProjectConfig = None
     output: Path = None
+    root: Path = None  # 项目根目录，相对路径的解析基准，默认取 TOML 所在目录
     fontfile: Path = Path("SC-Heavy.otf")
     video_width: int = 1920
     video_height: int = 1080
     cache_dir: Path = Path('cache_dir')
     output_dir: Path = Path('output_dir')
+    recode: bool = False  # 是否额外输出一份重编码视频，默认关闭，避免每次编译都多跑一遍
     video_preset: list[str] = field(default_factory=lambda: ['-c:v', 'hevc_nvenc', '-cq', '18', '-pix_fmt', 'p010le'])
     video_preset_cat: list[str] = field(default_factory=lambda: ['-c:v', 'copy', '-c:a', 'copy'])
     video_preset_cat_recode: list[str] = field(default_factory=lambda: ['-c:v', 'hevc_nvenc', '-crf', '18', '-pix_fmt', 'p010le'])
 
     def __post_init__(self):
-        assert self.MyGICA_path.suffixes[-2:] == ['.MyGICA', '.toml'], 'need .MyGICA.toml file'
-        assert self.MyGICA_path.exists(), '.MyGICA.toml file should exists'
-        assert self.fontfile.exists(), 'font file should exists'
+        check(self.MyGICA_path.suffixes[-2:] == ['.MyGICA', '.toml'], 'need .MyGICA.toml file')
+        check(self.MyGICA_path.exists(), '.MyGICA.toml file should exists')
+
+        # 相对路径统一以项目根目录为基准，默认取 TOML 所在目录
+        if self.root is None:
+            self.root = self.MyGICA_path.resolve().parent
+        else:
+            self.root = Path(self.root).resolve()
+        self.fontfile = resolve_path(self.root, self.fontfile)
+        self.cache_dir = resolve_path(self.root, self.cache_dir)
+        self.output_dir = resolve_path(self.root, self.output_dir)
+        check(self.fontfile.exists(), f'font file not found: {self.fontfile}')
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -46,13 +57,20 @@ class ScriptConfig:
         with self.MyGICA_path.open('rb') as f:
             self.project = parse_config(tomllib.load(f))
 
-        assert self.project.project_suffix in {'.mp4', '.mkv', '.mov'}, 'output file should be .mp4/.mkv/.mov'
-        self.output = self.output_dir / self.MyGICA_path.with_suffix(self.project.project_suffix)
-        if hasattr(self, 'video_preset_cat_recode'):
-            self.video_preset_cat_recode = ['-r', self.project.fps] + self.video_preset_cat_recode
+        # sources 里的相对路径同样相对项目根目录解析
+        self.project.sources = {
+            key: str(resolve_path(self.root, Path(value)))
+            for key, value in self.project.sources.items()
+        }
 
-        assert os.system('ffmpeg -version >nul 2>&1') == 0, 'should install ffmpeg and make sure it is in PATH'
-        assert self.project.fps != 23.976, 'fps 23.976 is not supported due to ffmpeg timestamp issues, please use 24000/1001 instead'
+        check(self.project.project_suffix in {'.mp4', '.mkv', '.mov'}, 'output file should be .mp4/.mkv/.mov')
+        # 只取文件名再拼到 output_dir，避免 MyGICA_path 是绝对路径时把输出目录整个盖掉
+        self.output = self.output_dir / self.MyGICA_path.with_suffix(self.project.project_suffix).name
+        self.video_preset_cat_recode = ['-r', self.project.fps] + self.video_preset_cat_recode
+
+        # fps 只接受整数或分数写法，23.976 与 29.97 这类浮点表示会在 parse_fps 里直接报错
+        parse_fps(self.project.fps)
+        check(shutil.which('ffmpeg') is not None, 'should install ffmpeg and make sure it is in PATH')
 
 
 # =============================
@@ -77,17 +95,18 @@ def frame_to_timestamp(frame: int, fps: Union[str, Literal['24000/1001']]) -> st
     return f"{h:02}:{m:02}:{s:02}.{ms:03}"
 
 
+def resolve_path(root: Path, path: Path) -> Path:
+    """相对路径按项目根目录解析，并统一规范化为绝对路径"""
+    path = Path(path)
+    resolved = path if path.is_absolute() else (root / path)
+    return resolved.resolve()
+
+
 def frame_to_time(frame: int, fps: Union[str, Literal['24000/1001']]) -> float:
-    """帧转时间字符串 (HH:MM:SS.mmm)"""
-    assert frame >= 0, 'frame should >= 0'
-    assert re.compile(r'^[\d/.]+$').match(fps), 'fps should be number or fraction string'
-    if '/' in fps:
-        num, denom = map(int, fps.split('/'))
-        fps = num / denom
-    else:
-        fps = float(fps)
-    total_seconds = frame / fps
-    return total_seconds
+    """帧转时间，单位为秒"""
+    check(frame >= 0, 'frame should >= 0')
+    num, denom = parse_fps(fps)
+    return frame * denom / num
 
 
 def escape_toml_string(s: str) -> str:
@@ -230,8 +249,8 @@ def work(config: ScriptConfig) -> None:
 
     logger.info(f"\n\n\n🎉🎉🎉 全部处理完成！输出文件: {config.output} 🎉🎉🎉\n\n")
 
-    # 重编码
-    if hasattr(config, 'video_preset_cat_recode') and config.video_preset_cat_recode:
+    # 重编码，仅在显式开启 --recode 时执行
+    if config.recode:
         logger.info("♻️ 开始重编码输出文件，增加兼容性，若输出文件已经兼容可无视此步骤")
         output_recode = config.cache_dir / f"output_recode.mp4"
         no_bgm_recode = config.cache_dir / f"no_bgm_recode.mp4"
@@ -387,8 +406,8 @@ def get_fade_text(drawtext_filter: str, output_list: Path, config: ScriptConfig,
     if length <= 20:
         logger.warning(f'字幕持续时间过短，无法应用淡入淡出效果。{length=}')
     file_name = new_base_text.with_stem(new_base_text.stem + '_%04d')
-    # 使用缓存
-    if Path(file_name.as_posix() % (length - 1)).exists():
+    # 使用缓存：首尾两帧都在才认为序列完整，避免读到中断留下的半套
+    if Path(file_name.as_posix() % 0).exists() and Path(file_name.as_posix() % (length - 1)).exists():
         logger.info("⏭️  使用缓存的淡入淡出字幕图片序列")
         return file_name.as_posix(), [Path(file_name.as_posix() % i) for i in range(length)]
     names = get_blur(new_base_text)
@@ -463,9 +482,30 @@ def cat_video(output: Path, segment_files: list[Path], config: ScriptConfig, par
     return cache_clip(cmd, segment_files, stream_terminal=stream_terminal)
 
 
+def measure_true_peak(path: Path) -> float:
+    """用 loudnorm 测量音频真峰值，只读音频流，返回 dBTP"""
+    cmd = [
+        'ffmpeg', '-hide_banner',
+        '-i', path.as_posix(),
+        '-vn',
+        '-af', 'loudnorm=print_format=json',
+        '-f', 'null',
+        '-'
+    ]
+    res = subprocess_run(cmd, stream_terminal=False)
+    lines: list[str] = [k.strip() for k in res.stderr.splitlines()]
+    try:
+        start = lines.index('{')
+        end = lines.index('}')
+    except ValueError as error:
+        raise ValueError(f"loudnorm 未输出可解析的 JSON，stderr 末尾：{res.stderr[-500:]}") from error
+    j = json.loads('\n'.join(lines[start:end + 1]))
+    return float(j['input_tp'])
+
+
 def add_bgm(bgm: Path, audio_advance_sec: float, input_path: Path, output_path: Path, stream_terminal: bool = True) -> Path:
-    """添加背景音乐"""
-    logger.info('添加 bgm 并提前', f'{audio_advance_sec=}')
+    """添加背景音乐，先只对混音音频做真峰值闭环，收敛后再一次性合成视频"""
+    logger.info(f'添加 bgm 并提前 {audio_advance_sec:.6f} 秒')
 
     tmp_output = input_path.parent / output_path.name
     audio_path = tmp_output.with_suffix('.aac')
@@ -484,37 +524,42 @@ def add_bgm(bgm: Path, audio_advance_sec: float, input_path: Path, output_path: 
         '-b:a', '192k',
         audio_path.as_posix(),
     ]
-    new_audio_path = cache_clip(cmd, [input_path, bgm], stream_terminal=stream_terminal)
+    current_audio = cache_clip(cmd, [input_path, bgm], stream_terminal=stream_terminal)
 
-    cmd = \
-        [
-            'ffmpeg', '-hide_banner',
-            '-i', new_audio_path.as_posix(),
-            '-af', 'loudnorm=print_format=json',
-            '-f', 'null',
-            '-'
-        ]
-    res = subprocess_run(cmd, stream_terminal=False)
-    lines: list[str] = [k.strip() for k in res.stderr.splitlines()]
-    j = json.loads('\n'.join(lines[lines.index('{'):lines.index('}') + 1]))
-    dB = -2 - float(j['input_tp'])  # 目标响度 -2dBTP
-
-    cmd = \
-        [
+    target_tp = -2.0
+    tolerance = 0.1
+    max_rounds = 3
+    for iteration in range(max_rounds):
+        input_tp = measure_true_peak(current_audio)
+        dB = target_tp - input_tp
+        if abs(dB) <= tolerance:
+            logger.info(f"♻️ 真峰值已达标：input_tp={input_tp:.2f}dBTP，第 {iteration + 1} 轮收敛")
+            break
+        logger.info(f"♻️ 真峰值归一化第 {iteration + 1} 轮：input_tp={input_tp:.2f}dBTP，增益 {dB:+.2f}dB")
+        gain_audio = current_audio.with_name(current_audio.stem + f'_gain{iteration}.aac')
+        cmd = [
             'ffmpeg', '-y', '-hide_banner',
-            '-i', input_path.as_posix(),
-            '-i', new_audio_path.as_posix(),
-            '-filter_complex',
-            f'[1:a]volume={dB}dB[a0]',  # 提升音量
-            '-map', '0:v',
-            '-map', '[a0]',
-            '-c:v', 'copy',
+            '-i', current_audio.as_posix(),
+            '-af', f'volume={dB}dB',
             '-c:a', 'aac',
             '-b:a', '192k',
-            tmp_output.as_posix()
+            gain_audio.as_posix(),
         ]
-    new_output = cache_clip(cmd, [input_path, new_audio_path], stream_terminal=stream_terminal)
-    return new_output
+        current_audio = cache_clip(cmd, [current_audio], stream_terminal=False)
+    else:
+        logger.warning(f"♻️ 真峰值归一化 {max_rounds} 轮仍未进入 ±{tolerance}dB 容差，请人工确认输出")
+
+    cmd = [
+        'ffmpeg', '-y', '-hide_banner',
+        '-i', input_path.as_posix(),
+        '-i', current_audio.as_posix(),
+        '-map', '0:v',
+        '-map', '1:a',
+        '-c:v', 'copy',
+        '-c:a', 'copy',
+        tmp_output.as_posix(),
+    ]
+    return cache_clip(cmd, [input_path, current_audio], stream_terminal=stream_terminal)
 
 
 # =============================
@@ -522,11 +567,20 @@ def add_bgm(bgm: Path, audio_advance_sec: float, input_path: Path, output_path: 
 # =============================
 @click.command()
 @click.argument('mygica_path', type=click.Path(exists=True, path_type=Path))
-@click.option('--font_file', default='SC-Heavy.otf', type=click.Path(path_type=Path), help='字体文件路径', show_default=True)
-@click.option('--cache_dir', default='cache_dir', type=click.Path(path_type=Path), help='缓存文件夹路径', show_default=True)
-@click.option('--output_dir', default='output_dir', type=click.Path(path_type=Path), help='输出文件夹路径', show_default=True)
-def cli(mygica_path: Path, cache_dir: Path, output_dir: Path, font_file: Path) -> None:
-    config = ScriptConfig(MyGICA_path=mygica_path, cache_dir=cache_dir, output_dir=output_dir, fontfile=font_file)
+@click.option('--root', default=None, type=click.Path(path_type=Path), help='项目根目录，相对路径的解析基准，默认取 TOML 所在目录')
+@click.option('--font-file', default='SC-Heavy.otf', type=click.Path(path_type=Path), help='字体文件路径', show_default=True)
+@click.option('--cache-dir', default='cache_dir', type=click.Path(path_type=Path), help='缓存文件夹路径', show_default=True)
+@click.option('--output-dir', default='output_dir', type=click.Path(path_type=Path), help='输出文件夹路径', show_default=True)
+@click.option('--recode/--no-recode', default=False, help='额外输出一份重编码视频以提升兼容性', show_default=True)
+def cli(mygica_path: Path, root: Path, cache_dir: Path, output_dir: Path, font_file: Path, recode: bool) -> None:
+    config = ScriptConfig(
+        MyGICA_path=mygica_path,
+        root=root,
+        cache_dir=cache_dir,
+        output_dir=output_dir,
+        fontfile=font_file,
+        recode=recode,
+    )
     work(config)
 
 

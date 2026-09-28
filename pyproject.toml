@@ -34,5 +34,5 @@ dependencies = [
 [project.scripts]
 # `uv tool install ___` 创建命令
 MyGICA = "MyGICA.A_compiler:cli"
-srt2MyGICA = "MyGICA.srt_to_MyGICA:cli"
+srt2MyGICA = "MyGICA.srt2MyGICA:cli"
 MyGICA_cache_cleaner = "MyGICA.time_based_cache_cleaner:cli"

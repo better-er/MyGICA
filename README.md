@@ -70,7 +70,7 @@ project/
 
 ```toml
 fps = '24000/1001'         # 帧率
-suffix = ".mp4"            # 输出文件格式
+project_suffix = ".mp4"    # 输出文件格式
 #start = 0                 # 视频起始帧（闭区间）建议只在需要快速预览时定义以只渲染部分视频
 #end = 5000                # 视频结束帧（开区间，下同）建议只在需要快速预览时定义以只渲染部分视频
 ```
@@ -178,7 +178,9 @@ pip install MyGICA
 MyGICA 示例.MyGICA.toml
 ```
 
-输出文件将保存在 `output_dir/{{project_name}}`。
+输出文件将保存在 `output_dir/{{project_name}}`。默认只输出一份视频，需要更高兼容性的重编码版本时加 `--recode`。
+
+素材、字体、缓存与输出目录都相对 TOML 所在目录解析，需要换基准时用 `--root` 指定。
 
 ---
 

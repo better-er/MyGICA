@@ -5,6 +5,31 @@ from dacite import from_dict, Config
 from loguru import logger
 
 
+def check(condition: bool, message: str) -> None:
+    """显式校验，失败时抛出带上下文的 ValueError，避免 assert 在 python -O 下被整体剥离"""
+    if not condition:
+        raise ValueError(message)
+
+
+def parse_fps(fps: str) -> tuple[int, int]:
+    """把 fps 解析为分子与分母组成的分数元组，只接受整数或分数写法，拒绝浮点表示"""
+    if '/' in fps:
+        num_str, denom_str = fps.split('/', 1)
+        if not (
+            num_str.isascii() and num_str.isdecimal()
+            and denom_str.isascii() and denom_str.isdecimal()
+        ):
+            raise ValueError(f"fps 只接受整数或分数写法，不接受浮点: {fps}")
+        num, denom = int(num_str), int(denom_str)
+    elif fps.isascii() and fps.isdecimal():
+        num, denom = int(fps), 1
+    else:
+        raise ValueError(f"fps 只接受整数或分数写法，不接受浮点: {fps}")
+    if denom == 0:
+        raise ValueError(f"fps 的分母不能为 0: {fps}")
+    return num, denom
+
+
 @dataclass
 class Clip:
     source: str  # source 的 key
@@ -53,17 +78,18 @@ class ProjectConfig:
             self.start = min((r.start for r in self.ranges), default=0)
         if self.end is None:
             self.end = max((r.end for r in self.ranges), default=0)
-        assert self.project_suffix.startswith('.'), "project_suffix 必须以 . 开头, 例如 .mkv, .mp4"
+        check(self.project_suffix.startswith('.'), "project_suffix 必须以 . 开头, 例如 .mkv, .mp4")
 
-        # assert sum(1 for r in self.ranges if r.start < self.start or r.end > self.end) == 0, \
-        #     "所有 Range 的 start 和 end 必须在 ProjectConfig 的 start 和 end 范围内"
 
         # 检查 start end 有序性
-        assert self.start < self.end, "ProjectConfig 的 start 必须小于 end"
-        for r in self.ranges:
-            assert r.start < r.end, f"Range 的 start 必须小于 end, {r=}"
+        check(self.start < self.end, "ProjectConfig 的 start 必须小于 end")
+        for index, r in enumerate(self.ranges, start=1):
+            check(r.start < r.end, f"第 {index} 个 Range 的 start 必须小于 end, {r=}")
         for i in range(len(self.ranges) - 1):
-            assert self.ranges[i].end <= self.ranges[i + 1].start, f"Range 之间不能重叠, {self.ranges[i]=}, {self.ranges[i + 1]=}"
+            check(
+                self.ranges[i].end <= self.ranges[i + 1].start,
+                f"第 {i + 1} 与第 {i + 2} 个 Range 之间不能重叠, {self.ranges[i]=}, {self.ranges[i + 1]=}",
+            )
 
         # 检查所有 Range 的 start 和 end 是否在 ProjectConfig 的 start 和 end 范围内，自动调整超出部分
         if sum(1 for r in self.ranges if r.start < self.start or r.end > self.end) != 0:
@@ -100,27 +126,27 @@ class ProjectConfig:
         NEXT = 'NEXT'  # noqa: N806
         PREV = 'PREV'  # noqa: N806
         all_sources = set(self.sources.keys()) | {NEXT, PREV}
-        for r in self.ranges:
+        for index, r in enumerate(self.ranges, start=1):
             for clip in r.clips:
-                assert clip.source in all_sources, f"Clip source '{clip.source}' not found in sources"
+                check(clip.source in all_sources, f"第 {index} 个 Range 内 Clip source '{clip.source}' 不在 sources 中")
 
         # 检查 Text 的 fontcolor 是否在 colors 中
         all_colors = set(self.colors.keys()) | {'white', 'black'}
-        for r in self.ranges:
+        for index, r in enumerate(self.ranges, start=1):
             for text in r.texts:
-                assert text.fontcolor in all_colors, f"Text fontcolor '{text.fontcolor}' not found in colors"
+                check(text.fontcolor in all_colors, f"第 {index} 个 Range 内 Text fontcolor '{text.fontcolor}' 不在 colors 中")
 
         # 检查 Clip 的 start 和 end 为 None 的总数不超过 1
-        for r in self.ranges:
+        for index, r in enumerate(self.ranges, start=1):
             none_count = sum(1 for clip in r.clips if clip.start is None and clip.end is None)
-            assert none_count <= 1, "每个 Range 内 Clip 的 start 和 end 同时为 None 的数量不能超过 1"
+            check(none_count <= 1, f"第 {index} 个 Range 内 start 和 end 同时为 None 的 Clip 不能超过 1 个")
 
         # 如果某个 Range 内没有任何 Clip，则自动延续上一个 Range 的最后一个 Clip
         last_source = 'black'
         last_end = None
         last_volume = 0
         skip_next = False
-        for r in self.ranges:
+        for range_index, r in enumerate(self.ranges, start=1):
             sum_length = sum((clip.end - clip.start) for clip in r.clips if clip.start is not None and clip.end is not None)
             if len(r.clips) > 0 and r.clips[-1].source == NEXT:
                 skip_next = True
@@ -134,7 +160,7 @@ class ProjectConfig:
                 last_volume = r.clips[0].volume
                 r.clips.clear()
             count_both_none = sum(1 for clip in r.clips if clip.start is None and clip.end is None)
-            assert count_both_none <= 1, f"每个 Range 内 Clip 的 start 和 end 同时为 None 的数量不能超过 1, {r=}"
+            check(count_both_none <= 1, f"第 {range_index} 个 Range 内 start 和 end 同时为 None 的 Clip 不能超过 1 个, {r=}")
             if len(r.clips) == 0:
                 logger.debug(f"日志: Range {r} 内没有任何 Clip, 自动延续上一个 Clip")
                 r.clips.append(Clip(source=last_source, start=last_end if last_source != 'black' else 0, volume=last_volume))
@@ -151,8 +177,8 @@ class ProjectConfig:
                 if clip.end is None:
                     clip.end = clip.start + (r.end - r.start - sum_length)
                     sum_length += (clip.end - clip.start)
-                assert clip.start <= clip.end, f"Clip 的 start 必须小于等于 end, {clip=}"
-            assert sum_length == r.end - r.start, f"每个 Range 内 Clip 的总长度必须等于 Range 的长度 {r}"
+                check(clip.start <= clip.end, f"第 {range_index} 个 Range 内 Clip 的 start 必须小于等于 end, {clip=}")
+            check(sum_length == r.end - r.start, f"第 {range_index} 个 Range 内 Clip 的总长度必须等于 Range 的长度 {r}")
             last_source = r.clips[-1].source
             last_end = r.clips[-1].end
             last_volume = r.clips[-1].volume
@@ -161,7 +187,7 @@ class ProjectConfig:
         last_source = 'black'
         last_start = None
         last_volume = 0
-        for r in reversed(self.ranges):
+        for reverse_index, r in enumerate(reversed(self.ranges), start=1):
             if (len(r.clips) > 0 and r.clips[-1].source == NEXT) or (len(r.clips) == 0):
                 logger.debug(f"日志: Range {r} 内 Clip source 为 NEXT, 自动延续下一个 Clip")
                 if len(r.clips) == 1 and r.clips[0].source == NEXT and r.clips[0].volume is not None:
@@ -171,46 +197,53 @@ class ProjectConfig:
                 rest = (r.end - r.start) - sum((clip.end - clip.start) for clip in r.clips)
                 clip = Clip(source=last_source, start=last_start - rest if last_start != 'black' else 0, volume=last_volume)
                 clip.end = clip.start + rest
-                assert clip.start <= clip.end, f"Clip 的 start 必须小于等于 end, {clip=}"
+                check(clip.start <= clip.end, f"倒数第 {reverse_index} 个 Range 内 Clip 的 start 必须小于等于 end, {clip=}")
                 r.clips.append(clip)
-            assert (r.end - r.start) == sum((clip.end - clip.start) for clip in r.clips), f"每个 Range 内 Clip 的总长度必须等于 Range 的长度 {r}"
+            check((r.end - r.start) == sum((clip.end - clip.start) for clip in r.clips), f"倒数第 {reverse_index} 个 Range 内 Clip 的总长度必须等于 Range 的长度 {r}")
             last_source = r.clips[0].source
             last_start = r.clips[0].start
             last_volume = r.clips[0].volume
 
         # 再次检查合法性
         # 1 检查所有 Range 的 start 和 end 是否在 ProjectConfig 的 start 和 end 范围内
-        assert sum(1 for r in self.ranges if r.start < self.start or r.end > self.end) == 0, \
-            "所有 Range 的 start 和 end 必须在 ProjectConfig 的 start 和 end 范围内"
+        check(
+            sum(1 for r in self.ranges if r.start < self.start or r.end > self.end) == 0,
+            "所有 Range 的 start 和 end 必须在 ProjectConfig 的 start 和 end 范围内",
+        )
         # 2 检查所有 Range 的时间段必须完整覆盖 ProjectConfig 的时间段，且不能重叠
-        assert sum(r.end - r.start for r in self.ranges) == self.end - self.start, \
-            "所有 Range 的时间段必须完整覆盖 ProjectConfig 的时间段，且不能重叠"
+        check(
+            sum(r.end - r.start for r in self.ranges) == self.end - self.start,
+            "所有 Range 的时间段必须完整覆盖 ProjectConfig 的时间段，且不能重叠",
+        )
         for i in range(len(self.ranges) - 1):
-            assert self.ranges[i].end <= self.ranges[i + 1].start, f"Range 之间不能重叠, {self.ranges[i]=}, {self.ranges[i + 1]=}"
+            check(
+                self.ranges[i].end <= self.ranges[i + 1].start,
+                f"第 {i + 1} 与第 {i + 2} 个 Range 之间不能重叠, {self.ranges[i]=}, {self.ranges[i + 1]=}",
+            )
         # 3 检查 Clip 的 start 和 end 不为 None
-        for r in self.ranges:
+        for index, r in enumerate(self.ranges, start=1):
             for clip in r.clips:
-                assert clip.start is not None and clip.end is not None, f"Clip 的 start 和 end 不能为空, {clip=}"
-                assert clip.start <= clip.end, f"Clip 的 start 必须小于等于 end, {clip=}"
+                check(clip.start is not None and clip.end is not None, f"第 {index} 个 Range 内 Clip 的 start 和 end 不能为空, {clip=}")
+                check(clip.start <= clip.end, f"第 {index} 个 Range 内 Clip 的 start 必须小于等于 end, {clip=}")
         # 4 检查每个 Range 内 Clip 的 start 和 end 的总长度必须等于 Range 的长度
-        for r in self.ranges:
-            assert (r.end - r.start) == sum((clip.end - clip.start) for clip in r.clips), f"每个 Range 内 Clip 的总长度必须等于 Range 的长度 {r}"
+        for index, r in enumerate(self.ranges, start=1):
+            check((r.end - r.start) == sum((clip.end - clip.start) for clip in r.clips), f"第 {index} 个 Range 内 Clip 的总长度必须等于 Range 的长度 {r}")
         # 5 检查 Clip 的 source 是否在 sources 中
-        for r in self.ranges:
+        for index, r in enumerate(self.ranges, start=1):
             for clip in r.clips:
-                assert clip.source in all_sources, f"Clip source '{clip.source}' not found in sources"
+                check(clip.source in all_sources, f"第 {index} 个 Range 内 Clip source '{clip.source}' 不在 sources 中")
         # 6 检查 Text 的 fontcolor 是否在 colors 中
-        for r in self.ranges:
+        for index, r in enumerate(self.ranges, start=1):
             for text in r.texts:
-                assert text.fontcolor in all_colors, f"Text fontcolor '{text.fontcolor}' not found in colors"
+                check(text.fontcolor in all_colors, f"第 {index} 个 Range 内 Text fontcolor '{text.fontcolor}' 不在 colors 中")
 
 
 def parse_config(data) -> ProjectConfig:
-    # 配置 dacite 忽略额外字段（可选），并支持嵌套
+    # strict=True 意味着数据里不能出现未知键，嵌套的 Range/Clip/Text 同样生效，拼错字段会直接抛 UnexpectedDataError
     config = Config(
         forward_references={"Clip": Clip, "Text": Text, "Range": Range},
         strict=True
-        # 不强制所有字段都存在（允许 dict 多余键）
+        # 字段名必须与 dataclass 完全一致，多一个未知键都会报错，不会静默取默认值
     )
     project_config = from_dict(
         data_class=ProjectConfig,

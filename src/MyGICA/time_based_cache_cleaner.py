@@ -25,7 +25,8 @@ class TimeBasedCache:
         """
         self.cache_file: Path = Path(cache_file)
         self.lock_file = self.cache_file.with_suffix('.lock')  # 锁文件
-        self.allowed_directories: list = allowed_directories if allowed_directories is not None else []
+        # 统一解析成绝对路径，避免与缓存键的路径形式不一致导致匹配失败
+        self.allowed_directories: list[Path] = [Path(d).resolve() for d in (allowed_directories or [])]
         self.cache: dict = self._load_cache()
         self._internal_lock = threading.Lock()  # ✅ 所有访问都靠这个串行锁！
 
@@ -88,24 +89,30 @@ class TimeBasedCache:
 
         Args:
             time_diff: 时间差对象，用于判断哪些元素需要被清理
-            dry_run: 如果为True，则只打印将要删除的元素和文件，而不实际删除
+            dry_run: 如果为True，则只记录将要删除的元素和文件，而不实际删除
             check_corruption: 如果为True，则检查缓存文件是否损坏
         """
         current_time = datetime.now()
         items_to_remove = []
         items_to_delete = []
-        count = 0
-        size = 0
+        kept_count = 0
+        kept_size = 0
+        deleted_count = 0
+        deleted_size = 0
 
         pool = ThreadPoolExecutor()
         futures = []
 
         def task(info_: dict) -> tuple[str | None, str | None]:
-            if info_['file_path'] and Path(info_['file_path']).exists():
-                result = subprocess_run(['ffprobe', '-hide_banner', '-print_format', 'json', '-show_format', '-show_streams', info_['file_path']], stream_terminal=False)
-                print(f"检查文件完整性：{info_['file_path']}, 返回码：{result.returncode}, 输出：{result.stdout}, 错误：{result.stderr}")
-                if result.returncode != 0:
-                    return result.stderr, info_['file_path']
+            # errors='ignore' 让 ffprobe 出错时返回非零返回码而不是抛异常，下面的 returncode 判断才有意义
+            result = subprocess_run(
+                ['ffprobe', '-hide_banner', '-print_format', 'json', '-show_format', '-show_streams', info_['file_path']],
+                stream_terminal=False,
+                errors='ignore',
+            )
+            logger.debug(f"检查文件完整性：{info_['file_path']}，返回码：{result.returncode}")
+            if result.returncode != 0:
+                return result.stderr, info_['file_path']
             return None, None
 
         for item, info in self.cache.items():
@@ -121,28 +128,22 @@ class TimeBasedCache:
                 items_to_remove.append(item)
                 continue
 
-            # 检查是否在允许的目录范围内
-            if self.allowed_directories:
-                # 检查文件路径是否在允许的目录列表中
-                allowed = False
-                for allowed_dir in self.allowed_directories:
-                    allowed_path = Path(allowed_dir)
-                    if file_path.is_relative_to(allowed_path):
-                        allowed = True
-                        break
-                if not allowed:
-                    # 若不在当前目录则移除
-                    if not file_path.is_relative_to(Path.cwd()):
-                        items_to_remove.append(item)
-                        logger.info(f"移除不在当前目录的缓存：{info['file_path']}")
-                        continue
-                    continue  # 跳过不在允许目录中的文件
-                if current_time - last_access > time_diff:
-                    items_to_delete.append(item)
-                    continue
+            # 白名单只决定是否允许删除，过期判断独立执行，避免白名单为空时 --days 被静默忽略
+            resolved_file = file_path.resolve()
+            if self.allowed_directories and not any(
+                resolved_file.is_relative_to(d) for d in self.allowed_directories
+            ):
+                # 白名单外且不在当前目录的缓存项只从记录里移除，不动文件
+                if not resolved_file.is_relative_to(Path.cwd().resolve()):
+                    items_to_remove.append(item)
+                    logger.info(f"移除不在当前目录的缓存：{info['file_path']}")
+                continue
+            if current_time - last_access > time_diff:
+                items_to_delete.append(item)
+                continue
 
-            count += 1
-            size += Path(info['file_path']).stat().st_size
+            kept_count += 1
+            kept_size += file_path.stat().st_size
             if check_corruption:
                 future = pool.submit(task, info)
                 futures.append(future)
@@ -150,22 +151,48 @@ class TimeBasedCache:
         for item in items_to_remove:
             # 仅从缓存中移除
             del self.cache[item]
-            print(f"已从缓存中移除：{item}")
+            logger.info(f"已从缓存中移除：{item}")
 
         for item in items_to_delete:
             # 如果对应的是文件，尝试删除
-            if self.cache[item]['file_path'] and Path(self.cache[item]['file_path']).exists():
+            file_path = Path(self.cache[item]['file_path'])
+            if file_path.exists():
+                file_size = file_path.stat().st_size
                 if dry_run:
-                    print(f"[模拟运行] 将删除文件：{self.cache[item]['file_path']}")
-                    continue
-                Path(self.cache[item]['file_path']).unlink()
-                print(f"已删除文件：{self.cache[item]['file_path']}")
+                    logger.info(f"[模拟运行] 将删除文件：{file_path}")
+                else:
+                    file_path.unlink()
+                    deleted_count += 1
+                    deleted_size += file_size
+                    logger.info(f"已删除文件：{file_path}")
 
             # 从缓存中移除
             del self.cache[item]
-            print(f"已从缓存中移除：{item}")
+            logger.info(f"已从缓存中移除：{item}")
 
-        print(f"总共删除项：{count}，释放空间：{size / (1024 * 1024):.2f} MB")
+        # 处理目录中未登记的文件，只有超过保留期限且非模拟运行才删除
+        # 未登记文件没有访问记录，只能按修改时间判断；已登记项一律按 last_access 处理
+        known_paths = {Path(key).resolve() for key in self.cache}
+        for allowed_dir in self.allowed_directories:
+            for file in allowed_dir.rglob('*'):
+                if not file.is_file():
+                    continue
+                resolved = file.resolve()
+                if resolved in known_paths:
+                    continue
+                mtime = datetime.fromtimestamp(file.stat().st_mtime)
+                if current_time - mtime <= time_diff:
+                    continue
+                if dry_run:
+                    logger.info(f"[模拟运行] 将删除未登记的过期文件：{file}")
+                    continue
+                deleted_count += 1
+                deleted_size += file.stat().st_size
+                logger.info(f"删除目录中未登记的过期文件：{file}，修改时间：{mtime:%Y-%m-%d %H:%M:%S}")
+                file.unlink()
+                known_paths.discard(resolved)
+
+        logger.info(f"删除 {deleted_count} 项，释放空间 {deleted_size / (1024 * 1024):.2f} MB；保留 {kept_count} 项，占用空间 {kept_size / (1024 * 1024):.2f} MB")
 
         # 保存更新后的缓存
         self._save_cache()
@@ -173,7 +200,7 @@ class TimeBasedCache:
         for future in futures:
             stderr, file_path = future.result()
             if stderr:
-                print(f"文件可能损坏或不可用：{file_path}\n错误信息：{stderr}")
+                logger.warning(f"文件可能损坏或不可用：{file_path}\n错误信息：{stderr}")
 
         # 统计剩余缓存信息
         remaining_count = len(self.cache)
@@ -187,21 +214,12 @@ class TimeBasedCache:
             stat_info = p.stat()
             inode_key = (stat_info.st_dev, stat_info.st_ino)
             if inode_key in seen_inodes:
-                # print(f"跳过重复文件：{p}")
                 continue
             seen_inodes.add(inode_key)
             remaining_size += stat_info.st_size
-        print(f"剩余缓存项：{remaining_count}，剩余大小：{remaining_size / (1024 * 1024):.2f} MB")
+        logger.info(f"剩余缓存项：{remaining_count}，剩余大小：{remaining_size / (1024 * 1024):.2f} MB")
 
-        # 查询在目录中但不在缓存中的文件
-        for allowed_dir in self.allowed_directories:
-            allowed_path = Path(allowed_dir)
-            for file in allowed_path.rglob('*'):
-                if file.is_file():
-                    if str(file) not in self.cache:
-                        file_size = file.stat().st_size
-                        print(f"目录中但不在缓存中的文件：{file}，大小：{file_size / (1024 * 1024):.2f} MB, 修改时间：{datetime.fromtimestamp(file.stat().st_mtime).strftime('%Y-%m-%d %H:%M:%S')}")
-                        file.unlink()
+
 
     def get_cache_info(self) -> dict:
         """获取缓存信息（用于调试）"""

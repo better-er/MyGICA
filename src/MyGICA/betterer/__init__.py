@@ -61,7 +61,7 @@ async def run_with_log(
     async def read_stream(stream: StreamReader, io: TextIO, buffer: bytearray) -> None:
         last = bytearray()
         while True:
-            chunk = await stream.read(1)  # 每次读取少量内容，避免阻塞
+            chunk = await stream.read(1)  # 必须逐字节，才能把 ffmpeg 的原生交互提问实时透传到终端
             if not chunk:  # EOF
                 break
             last += chunk
