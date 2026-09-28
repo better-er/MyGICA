@@ -56,10 +56,12 @@ project/
 ├── cache_dir/             # 缓存目录（临时片段）
 ├── output_dir/            # 输出目录（最终视频）
 └── src/
-    ├── A_compiler.py          # 编译器脚本（主逻辑，对应 MyGICA 命令行工具）
-    ├── structure.py           # 数据结构定义（用于解析 TOML，可以查看合法的定义）
-    ├── time_based_cache_cleaner.py    # 按时间管理缓存的工具（对应 MyGICA_cache_cleaner 命令行工具）
-    └── srt2MyGICA.py          # 将 SRT 转为 .MyGICA.toml 的脚本框架（对应 srt2MyGICA 命令行工具）
+    └── MyGICA/
+        ├── __init__.py                  # 包标记
+        ├── A_compiler.py                # 编译器脚本，主逻辑，对应 MyGICA 命令行工具
+        ├── structure.py                 # 数据结构定义，用于解析 TOML，可以查看合法的定义
+        ├── time_based_cache_cleaner.py  # 按时间管理缓存的工具，对应 MyGICA_cache_cleaner 命令行工具
+        └── srt2MyGICA.py                # 将 SRT 转为 .MyGICA.toml 的脚本框架，对应 srt2MyGICA 命令行工具
 ```
 
 ---
@@ -181,6 +183,18 @@ MyGICA 示例.MyGICA.toml
 输出文件将保存在 `output_dir/{{project_name}}`。默认只输出一份视频，需要更高兼容性的重编码版本时加 `--recode`。
 
 素材、字体、缓存与输出目录都相对 TOML 所在目录解析，需要换基准时用 `--root` 指定。
+
+---
+
+## 🧪 测试
+
+测试位于 `tests/`，覆盖配置解析与校验、帧率解析、帧与时间换算、TOML 转义、缓存清理策略，以及三个命令行入口的参数与报错行为。源码包 sdist 已包含 `tests/`，从源码仓库或 sdist 解包目录都能跑。
+
+```powershell
+uv run pytest
+```
+
+除少数构造完整 `ScriptConfig` 的用例需要系统 PATH 中的 ffmpeg 外，其余用例不调用 ffmpeg。
 
 ---
 

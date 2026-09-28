@@ -1,16 +1,19 @@
+[build-system]
+requires = ["uv_build>=0.12.8,<0.13"]
+build-backend = "uv_build"
+
 [project]
 name = "MyGICA"
 version = "1.0-alpha"
 description = "剪辑 MyGICA 视频的 MyGICA 工具, MyGICA 即 MyGO!!!!! & MUJICA"
 readme = "README.md"
-#license = { text = "AGPL-3.0-only" }
+license = "AGPL-3.0-only"
+license-files = ["LICENSE"]
 authors = [{ name = "betterer", email = "2534666876@qq.com" }]
 requires-python = ">=3.11"
 classifiers = [
     # 编程语言
     "Programming Language :: Python :: 3",
-    # 许可证
-    "License :: OSI Approved :: GNU Affero General Public License v3",
     # 系统无关性
     "Operating System :: OS Independent",
     # 项目状态
@@ -36,3 +39,21 @@ dependencies = [
 MyGICA = "MyGICA.A_compiler:cli"
 srt2MyGICA = "MyGICA.srt2MyGICA:cli"
 MyGICA_cache_cleaner = "MyGICA.time_based_cache_cleaner:cli"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+# 从 src 布局直接导入，不依赖是否已安装到环境
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.uv.build-backend]
+# 源码目录名与归一化后的项目名不一致，需要显式指定
+module-name = "MyGICA"
+module-root = "src"
+# 让源码包带上测试，解包后即可直接 pytest
+source-include = ["tests/**"]

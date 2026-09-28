@@ -89,7 +89,7 @@ class TimeBasedCache:
 
         Args:
             time_diff: 时间差对象，用于判断哪些元素需要被清理
-            dry_run: 如果为True，则只记录将要删除的元素和文件，而不实际删除
+            dry_run: 如果为True，则只记录将要删除的元素和文件，缓存与磁盘都不改动
             check_corruption: 如果为True，则检查缓存文件是否损坏
         """
         current_time = datetime.now()
@@ -148,24 +148,27 @@ class TimeBasedCache:
                 future = pool.submit(task, info)
                 futures.append(future)
 
+        # dry_run 下缓存与磁盘都保持原样，只报告将要发生的动作
         for item in items_to_remove:
+            if dry_run:
+                logger.info(f"[模拟运行] 将从缓存中移除：{item}")
+                continue
             # 仅从缓存中移除
             del self.cache[item]
             logger.info(f"已从缓存中移除：{item}")
 
         for item in items_to_delete:
-            # 如果对应的是文件，尝试删除
             file_path = Path(self.cache[item]['file_path'])
+            if dry_run:
+                logger.info(f"[模拟运行] 将删除文件并从缓存中移除：{file_path}")
+                continue
+            # 如果对应的是文件，尝试删除
             if file_path.exists():
                 file_size = file_path.stat().st_size
-                if dry_run:
-                    logger.info(f"[模拟运行] 将删除文件：{file_path}")
-                else:
-                    file_path.unlink()
-                    deleted_count += 1
-                    deleted_size += file_size
-                    logger.info(f"已删除文件：{file_path}")
-
+                file_path.unlink()
+                deleted_count += 1
+                deleted_size += file_size
+                logger.info(f"已删除文件：{file_path}")
             # 从缓存中移除
             del self.cache[item]
             logger.info(f"已从缓存中移除：{item}")
@@ -194,8 +197,11 @@ class TimeBasedCache:
 
         logger.info(f"删除 {deleted_count} 项，释放空间 {deleted_size / (1024 * 1024):.2f} MB；保留 {kept_count} 项，占用空间 {kept_size / (1024 * 1024):.2f} MB")
 
-        # 保存更新后的缓存
-        self._save_cache()
+        # 模拟运行没有改动内存中的缓存，也不必落盘
+        if dry_run:
+            logger.info("[模拟运行] 缓存文件保持原样")
+        else:
+            self._save_cache()
 
         for future in futures:
             stderr, file_path = future.result()
