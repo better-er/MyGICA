@@ -37,6 +37,7 @@ class Clip:
     end: Optional[int] = None
     volume: Optional[float] = None  # 音量，范围 -50 到 0，默认 0
     sound: Optional[str] = None  # sound 的 key
+    reason: Optional[str] = None  # 选这个画面的理由，编译后会写入同名外挂字幕
 
     def __post_init__(self):
         if self.source == 'black':
@@ -61,6 +62,25 @@ class Range:
     end: int
     clips: list[Clip] = field(default_factory=list)
     texts: list[Text] = field(default_factory=list)
+
+
+@dataclass
+class ReusedFrames:
+    """同一个源上被两个 Clip 重复使用的一段帧"""
+    source: str  # 重复发生的源
+    overlap_start: int  # 重复区间起点
+    overlap_end: int  # 重复区间终点
+    first_start: int
+    first_end: int
+    first_where: str  # 先出现的那个 Clip 的位置描述
+    second_start: int
+    second_end: int
+    second_where: str  # 后出现的那个 Clip 的位置描述
+
+    @property
+    def length(self) -> int:
+        """重复使用的帧数"""
+        return self.overlap_end - self.overlap_start
 
 
 @dataclass
@@ -236,6 +256,52 @@ class ProjectConfig:
         for index, r in enumerate(self.ranges, start=1):
             for text in r.texts:
                 check(text.fontcolor in all_colors, f"第 {index} 个 Range 内 Text fontcolor '{text.fontcolor}' 不在 colors 中")
+
+        # 7 检查同一个源的同一帧是否被多个 Clip 重复使用
+        check_reused_frames(self.ranges)
+
+
+def check_reused_frames(ranges: list[Range]) -> list[ReusedFrames]:
+    """检查同一个源的同一帧是否被多个 Clip 重复使用
+
+    同一段画面用两次，观众会在很短的时间里看到一模一样的镜头，属于选帧失误，
+    这里直接以 error 级别报出来，并把冲突区间返回给调用方。
+    """
+    spans: dict[str, list[tuple[int, int, str]]] = {}
+    for index, rng in enumerate(ranges, start=1):
+        for clip_index, clip in enumerate(rng.clips, start=1):
+            # black 只是纯色占位，重复使用没有意义，不参与检查
+            if clip.source == 'black':
+                continue
+            where = f"第 {index} 个 Range {rng.start}-{rng.end} 的第 {clip_index} 个 Clip"
+            spans.setdefault(clip.source, []).append((clip.start, clip.end, where))
+
+    reused: list[ReusedFrames] = []
+    for source, items in spans.items():
+        # 按起点排序后，只要存在重叠，就一定有一对相邻区间重叠
+        items.sort()
+        for first, second in zip(items, items[1:]):
+            if second[0] >= first[1]:
+                continue
+            reused.append(ReusedFrames(
+                source=source,
+                overlap_start=second[0],
+                overlap_end=min(first[1], second[1]),
+                first_start=first[0],
+                first_end=first[1],
+                first_where=first[2],
+                second_start=second[0],
+                second_end=second[1],
+                second_where=second[2],
+            ))
+
+    for item in reused:
+        logger.error(
+            f"♻️ 源 {item.source} 的帧 {item.overlap_start}-{item.overlap_end} 共 {item.length} 帧被重复使用："
+            f"{item.first_where} [{item.first_start},{item.first_end}] 与 "
+            f"{item.second_where} [{item.second_start},{item.second_end}]"
+        )
+    return reused
 
 
 def parse_config(data) -> ProjectConfig:

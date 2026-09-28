@@ -2,8 +2,27 @@
 
 import pytest
 from dacite import MissingValueError, UnexpectedDataError
+from loguru import logger
 
-from MyGICA.structure import check, parse_config, parse_fps
+from MyGICA.structure import (
+    Clip,
+    Range,
+    check,
+    check_reused_frames,
+    parse_config,
+    parse_fps,
+)
+
+
+@pytest.fixture
+def error_logs(quiet_logger) -> list[str]:
+    """收集测试期间 loguru 输出的 error 级别日志，需要先打开被屏蔽的 MyGICA 日志"""
+    messages: list[str] = []
+    logger.enable('MyGICA')
+    sink_id = logger.add(lambda message: messages.append(message), level='ERROR', format='{message}')
+    yield messages
+    logger.remove(sink_id)
+    logger.disable('MyGICA')
 
 
 def make_config(**overrides) -> dict:
@@ -195,3 +214,62 @@ def test_check_raises_with_message():
     with pytest.raises(ValueError, match='炸了'):
         check(False, '炸了')
     check(True, '炸了')
+
+
+def test_reused_frames_are_reported(error_logs):
+    reused = check_reused_frames([
+        Range(start=0, end=100, clips=[Clip(source='go1', start=0, end=60)]),
+        Range(start=100, end=200, clips=[Clip(source='go1', start=40, end=100)]),
+    ])
+    assert [(item.source, item.overlap_start, item.overlap_end, item.length) for item in reused] == [
+        ('go1', 40, 60, 20),
+    ]
+    assert len(error_logs) == 1
+    assert '重复使用' in error_logs[0]
+    assert 'go1' in error_logs[0]
+
+
+def test_reused_frames_within_one_range_are_reported(error_logs):
+    reused = check_reused_frames([
+        Range(start=0, end=100, clips=[
+            Clip(source='go1', start=0, end=60),
+            Clip(source='go1', start=50, end=90),
+        ]),
+    ])
+    assert [item.length for item in reused] == [10]
+
+
+def test_frames_touching_end_to_start_are_allowed(error_logs):
+    reused = check_reused_frames([
+        Range(start=0, end=100, clips=[Clip(source='go1', start=0, end=100)]),
+        Range(start=100, end=200, clips=[Clip(source='go1', start=100, end=200)]),
+    ])
+    assert reused == []
+    assert error_logs == []
+
+
+def test_same_frames_on_different_source_are_allowed(error_logs):
+    reused = check_reused_frames([
+        Range(start=0, end=100, clips=[Clip(source='go1', start=0, end=100)]),
+        Range(start=100, end=200, clips=[Clip(source='go2', start=0, end=100)]),
+    ])
+    assert reused == []
+    assert error_logs == []
+
+
+def test_black_source_is_skipped(error_logs):
+    reused = check_reused_frames([
+        Range(start=0, end=100, clips=[Clip(source='black', start=0, end=100)]),
+        Range(start=100, end=200, clips=[Clip(source='black', start=50, end=150)]),
+    ])
+    assert reused == []
+    assert error_logs == []
+
+
+def test_parse_config_reports_reused_frames(error_logs):
+    parse_config(make_config(ranges=[
+        {'start': 0, 'end': 100, 'clips': [{'source': 'go1', 'start': 0, 'end': 100}]},
+        {'start': 100, 'end': 200, 'clips': [{'source': 'go1', 'start': 50, 'end': 150}]},
+    ]))
+    assert len(error_logs) == 1
+    assert '重复使用' in error_logs[0]

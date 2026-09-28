@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from pprint import pformat
-from typing import Literal, Union
+from typing import Literal, Optional, Union
 
 import click
 import numpy as np
@@ -114,6 +114,72 @@ def escape_toml_string(s: str) -> str:
     return s.replace("'", r"\'").replace(":", r"\:")
 
 
+def escape_filter_path(path: Path) -> str:
+    """ffmpeg 滤镜里冒号是选项分隔符，Windows 盘符必须转义，并用单引号包住整个路径"""
+    escaped = str(path).replace('\\', '/').replace(':', r'\:')
+    return f"'{escaped}'"
+
+
+def frame_to_ass_time(frame: int, fps: Union[str, Literal['24000/1001']]) -> str:
+    """帧转 ASS 时间戳，格式 H:MM:SS.cc，ASS 只精确到厘秒"""
+    total_seconds = frame_to_time(frame, fps)
+    centiseconds = int(round(total_seconds * 100))
+    seconds, cs = divmod(centiseconds, 100)
+    hours, rem = divmod(seconds, 3600)
+    minutes, seconds = divmod(rem, 60)
+    return f"{hours}:{minutes:02}:{seconds:02}.{cs:02}"
+
+
+def escape_ass_text(s: str) -> str:
+    """转义字符串用于 ASS 字幕，大括号是覆盖标签的定界符，换行写成 ASS 的 \\N"""
+    return s.replace('{', '｛').replace('}', '｝').replace('\n', r'\N')
+
+
+def build_reason_ass(config: ScriptConfig) -> Optional[str]:
+    """为每个带 reason 的 Clip 生成一条 ASS 对话，全部 Clip 都没有 reason 时返回 None"""
+    project = config.project
+    dialogues = []
+    for rng in project.ranges:
+        # 视频时间轴从 project.start 开始算，Range 的 start 是项目时间轴的绝对帧
+        now = rng.start - project.start
+        for clip in rng.clips:
+            length = clip.end - clip.start
+            if clip.reason:
+                start = frame_to_ass_time(now, project.fps)
+                end = frame_to_ass_time(now + length, project.fps)
+                dialogues.append(f"Dialogue: 0,{start},{end},Reason,,0,0,0,,{escape_ass_text(clip.reason)}")
+            now += length
+    if not dialogues:
+        return None
+    header = (
+        "[Script Info]\n"
+        "ScriptType: v4.00+\n"
+        f"PlayResX: {config.video_width}\n"
+        f"PlayResY: {config.video_height}\n"
+        "WrapStyle: 0\n"
+        "\n"
+        "[V4+ Styles]\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        "Style: Reason,微软雅黑,42,&H00FFFFFF,&H000000FF,&H00202020,&H00000000,0,0,0,0,100,100,0,0,1,2,1,8,20,20,60,1\n"
+        "\n"
+        "[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+    )
+    return header + "\n".join(dialogues) + "\n"
+
+
+def write_reason_subtitle(config: ScriptConfig) -> Optional[Path]:
+    """生成与输出视频同名的外挂字幕，用来在播放时实时查看每个画面的选取理由"""
+    content = build_reason_ass(config)
+    if content is None:
+        return None
+    ass_path = config.output.with_suffix('.ass')
+    # 带 BOM 保存，避免部分播放器把中文识别成乱码
+    ass_path.write_text(content, encoding='utf-8-sig')
+    logger.info(f"📝 已生成选帧理由外挂字幕: {ass_path}")
+    return ass_path
+
+
 def is_image(file_path: Path) -> bool:
     """判断文件是否为图片格式"""
     image_extensions = {'.png', '.jpg', '.jpeg', '.bmp', '.gif', '.tiff', '.webp'}
@@ -160,7 +226,7 @@ def build_drawtext_filters(
         # 构建 drawtext 参数
         dt_args = \
             [
-                f"fontfile={fontfile}",  # 使用指定字体
+                f"fontfile={escape_filter_path(fontfile)}",  # 使用指定字体
                 f"text='{text_str}'",  # 显示文本
                 f"fontcolor={fontcolor}",
                 f"fontsize={fontsize}",
@@ -246,6 +312,9 @@ def work(config: ScriptConfig) -> None:
     # 硬链接到最终输出文件
     config.output.unlink(missing_ok=True)
     os.link(new_output, config.output)
+
+    # 生成与视频同名的外挂字幕，记录每个画面的选取理由，方便实时检查
+    write_reason_subtitle(config)
 
     logger.info(f"\n\n\n🎉🎉🎉 全部处理完成！输出文件: {config.output} 🎉🎉🎉\n\n")
 
