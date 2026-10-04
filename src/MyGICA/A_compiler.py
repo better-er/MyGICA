@@ -1,10 +1,13 @@
 import hashlib
 import json
+import math
 import os
 import shutil
 import tomllib
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from fractions import Fraction
 from pathlib import Path
 from pprint import pformat
 from typing import Literal, Optional, Union
@@ -15,7 +18,7 @@ from PIL import Image
 from loguru import logger
 
 from .betterer import subprocess_run
-from .structure import check, parse_config, parse_fps, Range, Text, ProjectConfig
+from .structure import check, describe_range, parse_config, parse_fps, Clip, Range, Text, ProjectConfig
 from .time_based_cache_cleaner import TimeBasedCache
 
 
@@ -31,8 +34,13 @@ class ScriptConfig:
     cache_dir: Path = Path('cache_dir')
     output_dir: Path = Path('output_dir')
     recode: bool = False  # 是否额外输出一份重编码视频，默认关闭，避免每次编译都多跑一遍
+    range_spec: Optional[str] = None  # 只渲染指定 Range，写法 3 或 3-5，1 起数，用于局部预览
+    min_font_ratio: float = 0.03  # 字号相对屏高的下限，低于就告警
+    verify: bool = True  # 是否把每个 clip 的首中末帧导出到校验目录
+    verify_dir: Path = Path('verify_dir')  # 校验帧的落盘目录，可以随时整个删掉
     video_preset: list[str] = field(default_factory=lambda: ['-c:v', 'hevc_nvenc', '-cq', '18', '-pix_fmt', 'p010le'])
-    video_preset_cat: list[str] = field(default_factory=lambda: ['-c:v', 'copy', '-c:a', 'copy'])
+    # 走 concat 滤镜时音频也必须一起编码，-c:a copy 与滤镜链不能共存
+    video_preset_cat: list[str] = field(default_factory=lambda: ['-c:v', 'hevc_nvenc', '-cq', '18', '-pix_fmt', 'p010le', '-c:a', 'aac', '-b:a', '192k'])
     video_preset_cat_recode: list[str] = field(default_factory=lambda: ['-c:v', 'hevc_nvenc', '-crf', '18', '-pix_fmt', 'p010le'])
 
     def __post_init__(self):
@@ -47,9 +55,12 @@ class ScriptConfig:
         self.fontfile = resolve_path(self.root, self.fontfile)
         self.cache_dir = resolve_path(self.root, self.cache_dir)
         self.output_dir = resolve_path(self.root, self.output_dir)
+        self.verify_dir = resolve_path(self.root, self.verify_dir)
         check(self.fontfile.exists(), f'font file not found: {self.fontfile}')
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        if self.verify:
+            self.verify_dir.mkdir(parents=True, exist_ok=True)
 
         # =============================
         # 解析配置文件，并且生成 ProjectConfig 对象时排除不合法的情况
@@ -63,10 +74,46 @@ class ScriptConfig:
             for key, value in self.project.sources.items()
         }
 
+        # 文本可以各自换字体，相对路径同样以项目根为基准
+        for rng in self.project.ranges:
+            for text in rng.texts:
+                if text.fontfile:
+                    resolved = resolve_path(self.root, Path(text.fontfile))
+                    check(resolved.exists(), f"字体文件不存在: {resolved}")
+                    text.fontfile = str(resolved)
+
         check(self.project.project_suffix in {'.mp4', '.mkv', '.mov'}, 'output file should be .mp4/.mkv/.mov')
+
+        # 只渲染指定的 Range 时先裁剪再算输出名，出来的片子只覆盖这一段，不会盖掉完整版
+        output_suffix = ''
+        # 报错与告警一律按原配置里的 Range 序号报，裁剪后也不会串位
+        range_numbers = list(range(1, len(self.project.ranges) + 1))
+        if self.range_spec:
+            selected = parse_range_spec(self.range_spec, len(self.project.ranges))
+            range_numbers = [index + 1 for index in selected]
+            self.project.ranges = [self.project.ranges[index] for index in selected]
+            self.project.start = self.project.ranges[0].start
+            self.project.end = self.project.ranges[-1].end
+            output_suffix = f'_r{self.range_spec}'
+            logger.info(f"🎯 只渲染选中的 {len(self.project.ranges)} 个 Range，成片范围 {self.project.start}-{self.project.end}")
+
         # 只取文件名再拼到 output_dir，避免 MyGICA_path 是绝对路径时把输出目录整个盖掉
-        self.output = self.output_dir / self.MyGICA_path.with_suffix(self.project.project_suffix).name
+        output_name = self.MyGICA_path.with_suffix(self.project.project_suffix)
+        if output_suffix:
+            output_name = output_name.with_stem(output_name.stem + output_suffix)
+        self.output = self.output_dir / output_name.name
         self.video_preset_cat_recode = ['-r', self.project.fps] + self.video_preset_cat_recode
+
+        # 字号下限按工作区的画面字号规范，低于屏高 3% 的小字读不清
+        for position, rng in enumerate(self.project.ranges):
+            for text_index, text in enumerate(rng.texts, start=1):
+                index = range_numbers[position]
+                ratio = text.fontsize / self.video_height
+                if ratio < self.min_font_ratio:
+                    logger.warning(
+                        f"字号低于下限：{describe_range(index, rng)} 的第 {text_index} 条 Text "
+                        f"fontsize={text.fontsize}，占屏高 {ratio:.1%}，下限 {self.min_font_ratio:.0%}"
+                    )
 
         # fps 只接受整数或分数写法，23.976 与 29.97 这类浮点表示会在 parse_fps 里直接报错
         parse_fps(self.project.fps)
@@ -100,6 +147,135 @@ def resolve_path(root: Path, path: Path) -> Path:
     path = Path(path)
     resolved = path if path.is_absolute() else (root / path)
     return resolved.resolve()
+
+
+def parse_range_spec(spec: str, total: int) -> list[int]:
+    """解析 1 起数的 Range 选择，接受 3 与 3-5 两种写法，返回 0 起数的下标列表"""
+    text = spec.strip()
+    check(text != '', '--range 不能为空')
+    if '-' in text:
+        head, _, tail = text.partition('-')
+        start, end = parse_range_index(head, total), parse_range_index(tail, total)
+        check(start <= end, f"--range 的起点不能大于终点: {spec}")
+        return list(range(start, end + 1))
+    return [parse_range_index(text, total)]
+
+
+def parse_range_index(raw: str, total: int) -> int:
+    """把 1 起数的 Range 序号转成 0 起数下标，并检查是否越界"""
+    text = raw.strip()
+    check(text.isdigit(), f"--range 只接受数字写法: {raw!r}")
+    index = int(text) - 1
+    check(0 <= index < total, f"--range 超出范围，共有 {total} 个 Range: {raw}")
+    return index
+
+
+def probe_frames(path: Path) -> tuple[list[int], Fraction]:
+    """一次 ffprobe 同时拿到全部帧的时间戳与帧率，帧数就是时间戳的个数
+
+    帧数与时间戳分两次调用会把这个文件解码两遍，长一点的成片上就是好几秒的差别。
+    """
+    cmd = [
+        'ffprobe', '-v', 'error',
+        '-select_streams', 'v:0',
+        '-show_entries', 'stream=r_frame_rate:frame=pts',
+        '-of', 'json',
+        path.as_posix(),
+    ]
+    res = subprocess_run(cmd, stream_terminal=False)
+    check(res.returncode == 0, f"ffprobe 读取失败: {path}\n{res.stderr[-500:]}")
+    data = json.loads(res.stdout)
+    streams = data.get('streams', [])
+    check(len(streams) > 0, f"ffprobe 未返回视频流: {path}")
+    raw_rate = streams[0].get('r_frame_rate', '')
+    check('/' in raw_rate, f"ffprobe 未返回帧率: {path}\n{res.stdout[:200]}")
+    pts: list[int] = []
+    for frame in data.get('frames', []):
+        value = str(frame.get('pts', ''))
+        check(value.lstrip('-').isdigit(), f"ffprobe 返回了无法解析的时间戳 {value!r}: {path}")
+        pts.append(int(value))
+    check(pts, f"ffprobe 未返回任何帧: {path}")
+    return pts, Fraction(raw_rate)
+
+
+def probe_video(path: Path) -> tuple[int, Fraction]:
+    """读出视频的帧数与帧率"""
+    pts, fps = probe_frames(path)
+    return len(pts), fps
+
+
+def check_frame(path: Path) -> int:
+    """数出视频里实际有多少帧，用于校验渲染结果与配置声明是否一致"""
+    return probe_video(path)[0]
+
+
+def clip_label(rng_start: int, index: int, clip: Clip) -> str:
+    """校验帧的文件名前缀，带上片段身份，换了取帧就不会复用上一次留下的图"""
+    identity = f"{clip.source}:{clip.start}:{clip.end}:{clip.filters or ''}"
+    return f"{rng_start:04d}_{index:02d}_{hashlib.md5(identity.encode()).hexdigest()[:6]}"
+
+
+def export_clip_frames(clip_file: Path, config: ScriptConfig, frame_count: int, label: str) -> list[Path]:
+    """把片段的首、中、末三帧导出到校验目录，方便逐个 clip 核对取到的画面
+
+    只抽一个时间点很容易看走眼，三帧能看出这一段是不是稳定的、有没有夹到转场。
+    已经存在的帧直接复用，所以重复编译不会重跑 ffmpeg。
+    """
+    if not config.verify:
+        return []
+    indices = sorted({0, frame_count // 2, frame_count - 1})
+    outputs: list[Path] = []
+    for index in indices:
+        target = config.verify_dir / f"{label}_{index:04d}.png"
+        if target.exists() and target.stat().st_size > 0:
+            outputs.append(target)
+            continue
+        cmd = [
+            'ffmpeg', '-y', '-hide_banner',
+            '-i', clip_file.as_posix(),
+            '-vf', f"select='eq(n\\,{index})'",
+            '-frames:v', '1',
+            target.as_posix(),
+        ]
+        subprocess_run(cmd, stream_terminal=False)
+        check(target.exists() and target.stat().st_size > 0, f"抽取校验帧失败: {target}")
+        outputs.append(target)
+    logger.info(f"🖼️  校验帧 {label}: " + ', '.join(p.name for p in outputs))
+    return outputs
+
+
+def find_gaps(pts: list[int]) -> list[int]:
+    """找出相邻帧时间戳不是标准步长的位置，返回这些帧的序号
+
+    步长取众数，所以不必知道容器的时间基。
+    """
+    if len(pts) < 3:
+        return []
+    diffs = [b - a for a, b in zip(pts, pts[1:])]
+    one = Counter(diffs).most_common(1)[0][0]
+    return [i for i, d in enumerate(diffs) if d != one]
+
+
+def probe_gaps(path: Path) -> list[int]:
+    """只查某个文件的时间戳连续性，校验主路径走 probe_frames，这里留给单独调用的场合"""
+    return find_gaps(probe_frames(path)[0])
+
+
+def check_video(path: Path, expect_frames: int, expect_fps: str, where: str) -> None:
+    """同时校验帧数、帧率与时间戳连续性，改帧数的滤镜和拼接留下的空档都在这里拦下"""
+    pts, fps = probe_frames(path)
+    frames = len(pts)
+    expect = Fraction(*parse_fps(expect_fps))
+    check(frames == expect_frames, f"{where} 帧数不匹配：期望 {expect_frames} 帧，实际 {frames} 帧")
+    check(
+        fps == expect,
+        f"{where} 帧率不匹配：期望 {expect_fps} ({float(expect):.3f})，实际 {fps} ({float(fps):.3f})，检查 Clip.filters",
+    )
+    gaps = find_gaps(pts)
+    check(
+        not gaps,
+        f"{where} 时间戳有 {len(gaps)} 处不连续，出现在第 {gaps[:5]} 帧之后，成片会在这些位置定格一帧",
+    )
 
 
 def frame_to_time(frame: int, fps: Union[str, Literal['24000/1001']]) -> float:
@@ -226,14 +402,20 @@ def build_drawtext_filters(
         # 构建 drawtext 参数
         dt_args = \
             [
-                f"fontfile={escape_filter_path(fontfile)}",  # 使用指定字体
+                f"fontfile={escape_filter_path(Path(txt.fontfile) if txt.fontfile else fontfile)}",
                 f"text='{text_str}'",  # 显示文本
                 f"fontcolor={fontcolor}",
                 f"fontsize={fontsize}",
             ] + xy + [
                 f"borderw={borderw}",
                 f"bordercolor={bordercolor}",
+                f"shadowx={txt.shadowx}",
+                f"shadowy={txt.shadowy}",
+                f"shadowcolor={txt.shadowcolor}",
             ]
+        # 自定义参数排在最后，ffmpeg 同名选项后者覆盖前者，所以能盖掉上面的默认值
+        if txt.extra:
+            dt_args.append(txt.extra)
         filters.append(f"drawtext={':'.join(dt_args)}")
 
     return ",".join(filters)
@@ -316,6 +498,11 @@ def work(config: ScriptConfig) -> None:
     # 生成与视频同名的外挂字幕，记录每个画面的选取理由，方便实时检查
     write_reason_subtitle(config)
 
+    # 成片帧数必须与配置声明的长度一致，这是唯一能拦住滤镜或换算出错的闸门
+    expect_frames = project.end - project.start
+    check_video(config.output, expect_frames, project.fps, "成片")
+    logger.info(f"✅ 成片帧数与帧率校验通过：{expect_frames} 帧 @ {project.fps}")
+
     logger.info(f"\n\n\n🎉🎉🎉 全部处理完成！输出文件: {config.output} 🎉🎉🎉\n\n")
 
     # 重编码，仅在显式开启 --recode 时执行
@@ -335,37 +522,48 @@ def work(config: ScriptConfig) -> None:
 def work_clips(config: ScriptConfig, rng: Range, seg_file: Path) -> Path:
     # 提前生成字幕缓存
     pool = ThreadPoolExecutor()
-    futures_text = []
-    futures_clip = []
-    # 构建字幕滤镜
+    future_text = None
+    futures_clip: list[tuple] = []
+    # 构建字幕，Text 自带 start/end 时会在 get_fade_text 里按时段切片
     texts = rng.texts
     if texts:
-        drawtext_filter = build_drawtext_filters(texts, config.project, fontfile=config.fontfile)
         new_seg_file_txt = seg_file.with_stem(seg_file.stem + '_text')
         input_list = new_seg_file_txt.with_suffix('.txt')
-        future = pool.submit(get_fade_text, drawtext_filter, input_list, config, rng.end - rng.start)
-        futures_text.append(future)
-    else:
-        drawtext_filter = ""
+        future_text = pool.submit(get_fade_text, texts, input_list, config, rng.end - rng.start)
 
     segment_files = []
     now_time = rng.start
     for i, clip in enumerate(rng.clips):
-        src_path = config.project.sources[clip.source]
+        src_path = config.project.sources.get(clip.source)
         # project_start_time = frame_to_time(now_time, config.project.fps)
         # bgm = config.project.sources['bgm']
         frame_count = clip.end - clip.start  # 精确帧数
 
         clip_file = seg_file.with_stem(seg_file.stem + f'_{i}') if len(rng.clips) > 1 else seg_file
 
-        af = ['-af', f'volume={clip.volume}dB'] if clip.volume is not None else []
+        af = volume_filter(clip.volume)
         # af_inline = f'volume={clip.volume}dB' if clip.volume is not None else ''
         # af_in = f'[0:a]{af_inline}[a0_vol];[a0_vol]' if clip.volume is not None else '[0:a]'
 
+        # black 且用户没有准备素材时直接用 lavfi 合成，不必依赖 cache_in 里的占位视频
+        if clip.source == 'black' and clip.source not in config.project.sources:
+            cmd = [
+                'ffmpeg', '-y', '-hide_banner',
+                '-f', 'lavfi', '-i', f'color=c=black:s={config.video_width}x{config.video_height}:r={config.project.fps}',
+                '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100',
+                '-vframes', str(frame_count),
+                '-c:a', 'aac', '-b:a', '128k', '-ar', '44100', '-ac', '2',
+            ]
+            if clip.filters:
+                cmd.extend(['-vf', clip.filters])
+            cmd.extend(af + config.video_preset + [clip_file.as_posix()])
+            files = []
         # 判断 source 是否是图片
-        if is_image(Path(src_path)):
+        elif is_image(Path(src_path)):
             # 基础滤镜：缩放和填充
             base_filter = f'scale={config.video_width}:{config.video_height}:force_original_aspect_ratio=decrease,pad={config.video_width}:{config.video_height}:(ow-iw)/2:(oh-ih)/2'
+            if clip.filters:
+                base_filter = f"{base_filter},{clip.filters}"
 
             # 图片 -> 视频：循环 + 精确帧数控制
             cmd = \
@@ -411,33 +609,35 @@ def work_clips(config: ScriptConfig, rng: Range, seg_file: Path) -> Path:
                 '-ar', '44100',  # 统一采样率
                 '-ac', '2',  # 统一声道数
             ])
+            if clip.filters:
+                cmd.extend(['-vf', clip.filters])
             cmd.extend(af + config.video_preset + [clip_file.as_posix()])
 
         logger.info(f"✂️ 剪辑: {clip.source} [{clip.start}:{clip.end}] ({frame_count} 帧) → {clip_file.name}")
         # new_clip_file = cache_clip(cmd, files)
         future = pool.submit(cache_clip, cmd, files)
-        futures_clip.append(future)
-        # segment_files.append(new_clip_file)
-        # assert (res := check_frame(new_clip_file)) == clip.end - clip.start, RuntimeError(f'帧数不匹配, {res} != {clip.end - clip.start}, {new_clip_file.name}')
+        futures_clip.append((future, frame_count, clip_file, clip_label(rng.start, i, clip)))
 
         now_time += frame_count
 
-    for future in futures_clip:
-        segment_files.append(future.result())
+    # 每个片段渲染出来的帧数必须与声明一致，改帧数的 filters 会在这里现形
+    for future, expect_frames, clip_file, label in futures_clip:
+        new_clip_file = future.result()
+        check_video(new_clip_file, expect_frames, config.project.fps, f"片段 {clip_file.name}")
+        export_clip_frames(new_clip_file, config, expect_frames, label)
+        segment_files.append(new_clip_file)
 
     if len(rng.clips) > 1:
         new_seg_file = cat_video(seg_file, segment_files, config, config.video_preset_cat, stream_terminal=False)
-        # assert (res := check_frame(seg_file)) == rng.end - rng.start, RuntimeError(f'帧数不匹配, {res} != {rng.end - rng.start}, {seg_file.name}')
+        check_video(new_seg_file, rng.end - rng.start, config.project.fps, f"拼接后的 {seg_file.name}")
     else:
         new_seg_file = segment_files[0]
-    # 添加字幕滤镜
-    for f in futures_text:
-        f.result()
-    pool.shutdown()
-    if drawtext_filter:
+
+    # 添加字幕
+    if future_text is not None:
+        pattern, text_files = future_text.result()
+        pool.shutdown()
         new_seg_file_txt = seg_file.with_stem(seg_file.stem + '_text')
-        input_list = new_seg_file_txt.with_suffix('.txt')
-        pattern, text_files = get_fade_text(drawtext_filter, input_list, config, rng.end - rng.start)
         cmd = \
             [
                 'ffmpeg', '-y', '-hide_banner',
@@ -452,67 +652,172 @@ def work_clips(config: ScriptConfig, rng: Range, seg_file: Path) -> Path:
         new_seg_file_txt = cache_clip(cmd, files)
         return new_seg_file_txt
 
+    pool.shutdown()
     return new_seg_file
 
 
-def get_fade_text(drawtext_filter: str, output_list: Path, config: ScriptConfig, length: int) -> tuple[str, list[Path]]:
-    """生成淡入淡出字幕的文本文件"""
+def ensure_transparent(config: ScriptConfig) -> Path:
+    """全透明底图，多个字幕段共用同一张"""
     transparent_path = config.cache_dir / Path("transparent.png")
     if not transparent_path.exists():
         transparent = np.zeros((config.video_height, config.video_width, 4), dtype=np.uint8)
         Image.fromarray(transparent).save(transparent_path)
-    base_text = output_list.with_suffix('.png')
+    return transparent_path
+
+
+FADE_FRAMES = 10  # 淡入淡出各占多少帧，字幕显示得不够长时按显示长度的一半压
+
+
+@dataclass
+class TextLayer:
+    """一条 Text 单独渲染出来的一层，连同它自己那份淡入淡出序列
+
+    淡入淡出只按这条 Text 自己的显示区间算，所以同屏的别的字幕进出不会连累它，
+    一句连续显示的字幕不会因为中间插进另一句就在原处闪一下。
+    """
+    label: str
+    start: int  # 相对 Range 起点的显示起点
+    end: int  # 开区间
+    base: Path
+    names: list[list[Path]]  # 淡入 10 张、淡出 10 张
+
+    @property
+    def span(self) -> int:
+        return self.end - self.start
+
+    @property
+    def fade(self) -> int:
+        return min(FADE_FRAMES, self.span // 2)
+
+    def at(self, frame: int) -> Path:
+        """按这条 Text 自己的进度挑该用哪张图"""
+        offset = frame - self.start
+        fade = self.fade
+        if fade:
+            if offset < fade:
+                return self.names[0][offset]
+            if offset >= self.span - fade:
+                return self.names[1][self.span - 1 - offset]
+        return self.base
+
+
+def text_spans(texts: list[Text], length: int) -> list[tuple[int, int, Text]]:
+    """把每条 Text 的显示区间补齐成绝对帧号，缺一端就按 Range 的两端补"""
+    return [
+        (0 if text.start is None else text.start, length if text.end is None else text.end, text)
+        for text in texts
+    ]
+
+
+def render_text_layer(index: int, start: int, end: int, text: Text, transparent_path: Path, config: ScriptConfig) -> TextLayer:
+    """把一条 Text 单独渲到透明底上，作为合成用的一层"""
+    drawtext_filter = build_drawtext_filters([text], config.project, fontfile=config.fontfile)
+    target = config.cache_dir / f'layer_{index}.png'
     cmd = [
         "ffmpeg", "-y", "-hide_banner",
-        "-i", transparent_path.as_posix(),  # 使用透明背景
+        "-i", transparent_path.as_posix(),
         "-vf", drawtext_filter,
         '-frames:v', '1',
-        '-update', '1',  # 只输出最后一帧
-        base_text
+        '-update', '1',
+        target.as_posix(),
     ]
-    files = [transparent_path]
-    new_base_text = cache_clip(cmd, files, stream_terminal=False)
-    if length <= 20:
-        logger.warning(f'字幕持续时间过短，无法应用淡入淡出效果。{length=}')
-    file_name = new_base_text.with_stem(new_base_text.stem + '_%04d')
+    base = cache_clip(cmd, [transparent_path], stream_terminal=False)
+    layer = TextLayer(label=text.text, start=start, end=end, base=base, names=get_blur(base))
+    if layer.fade < FADE_FRAMES:
+        logger.warning(f'字幕「{text.text}」只显示 {layer.span} 帧，淡入淡出压缩到 {layer.fade} 帧')
+    return layer
+
+
+class LayerComposer:
+    """同屏多层字幕的合成器，按层内容命名，内容变了不会复用旧图"""
+    def __init__(self, output_list: Path):
+        self.output_list = output_list
+        self.done: dict[tuple[str, ...], Path] = {}
+
+    def compose(self, paths: list[Path]) -> Path:
+        key = tuple(path.name for path in paths)
+        hit = self.done.get(key)
+        if hit is not None:
+            return hit
+        digest = hashlib.md5('|'.join(key).encode()).hexdigest()[:6]
+        target = self.output_list.with_stem(f'{self.output_list.stem}_mix_{digest}').with_suffix('.png')
+        if not target.exists():
+            image = Image.open(paths[0]).convert('RGBA')
+            for path in paths[1:]:
+                image = Image.alpha_composite(image, Image.open(path).convert('RGBA'))
+            image.save(target)
+        self.done[key] = target
+        return target
+
+
+def link_frame(source: Path, target: Path) -> None:
+    """用硬链接把某一帧指向已生成的图，避免复制像素"""
+    target.unlink(missing_ok=True)
+    os.link(source, target)
+
+
+def get_fade_text(texts: list[Text], output_list: Path, config: ScriptConfig, length: int) -> tuple[str, list[Path]]:
+    """生成整段字幕的逐帧 PNG 序列，每条 Text 各渲一层，各自淡入淡出"""
+    transparent_path = ensure_transparent(config)
+    spans = text_spans(texts, length)
+    # 缓存键取配置本身，不必先把图层渲出来才知道内容变没变
+    digest = hashlib.md5('|'.join(f'{t0}:{t1}:{text!r}' for t0, t1, text in spans).encode()).hexdigest()[:6]
+    file_name = output_list.with_stem(f'{output_list.stem}_{digest}_%04d').with_suffix('.png').as_posix()
+
     # 使用缓存：首尾两帧都在才认为序列完整，避免读到中断留下的半套
-    if Path(file_name.as_posix() % 0).exists() and Path(file_name.as_posix() % (length - 1)).exists():
+    if Path(file_name % 0).exists() and Path(file_name % (length - 1)).exists():
         logger.info("⏭️  使用缓存的淡入淡出字幕图片序列")
-        return file_name.as_posix(), [Path(file_name.as_posix() % i) for i in range(length)]
-    names = get_blur(new_base_text)
-    for i in reversed(range(10)):
-        Path(file_name.as_posix() % (length - 1 - i)).unlink(missing_ok=True)
-        os.link(names[1][i], file_name.as_posix() % (length - 1 - i))
-    for i in range(10):
-        Path(file_name.as_posix() % i).unlink(missing_ok=True)
-        os.link(names[0][i], file_name.as_posix() % i)
-    for i in range(10, length - 10):
-        Path(file_name.as_posix() % i).unlink(missing_ok=True)
-        os.link(new_base_text, file_name.as_posix() % i)
-    return file_name.as_posix(), [Path(file_name.as_posix() % i) for i in range(length)]
+        return file_name, [Path(file_name % i) for i in range(length)]
+
+    layers = [
+        render_text_layer(index, t0, t1, text, transparent_path, config)
+        for index, (t0, t1, text) in enumerate(spans)
+    ]
+    composer = LayerComposer(output_list)
+
+    for i in range(length):
+        active = [layer for layer in layers if layer.start <= i < layer.end]
+        if not active:
+            link_frame(transparent_path, Path(file_name % i))
+        elif len(active) == 1:
+            link_frame(active[0].at(i), Path(file_name % i))
+        else:
+            link_frame(composer.compose([layer.at(i) for layer in active]), Path(file_name % i))
+
+    return file_name, [Path(file_name % i) for i in range(length)]
 
 
 def get_blur(base_text: Path) -> list[list[Path]]:
-    """生成淡入淡出字幕的图片序列"""
+    """生成淡入淡出字幕的图片序列，文件名跟着图层内容走，生成过就直接复用"""
+    names = [
+        [base_text.with_stem(base_text.stem + f'_{i:02d}') for i in range(FADE_FRAMES)],
+        [base_text.with_stem(base_text.stem + f'-{i:02d}') for i in range(FADE_FRAMES)],
+    ]
+    if all(path.exists() for pair in names for path in pair):
+        return names
+
     img = Image.open(base_text)
     img_np = np.array(img)
 
     def rotate(image_np: np.ndarray) -> np.ndarray:
         return image_np[::-1, ::-1, :]
 
-    names = [
-        [base_text.with_stem(base_text.stem + f'_{i:02d}') for i in range(10)],
-        [base_text.with_stem(base_text.stem + f'-{i:02d}') for i in range(10)],
-    ]
-
     for k in range(2):
         if k == 1: img_np = rotate(img_np)  # noqa: E701
         alpha_channel = img_np[:, :, 3]
         alpha_channel = np.max(alpha_channel, axis=0)
-        start = min(np.where(alpha_channel != 0)[0])
-        end = max(np.where(alpha_channel != 0)[0])
-        step = (end - start) // 10
-        for i in range(10):
+        painted = np.where(alpha_channel != 0)[0]
+        if len(painted) == 0:
+            # 空字幕没有像素可淡，两端的图都拿原图顶上
+            for i in range(FADE_FRAMES):
+                for path in (names[0][i], names[1][i]):
+                    path.unlink(missing_ok=True)
+                    os.link(base_text, path)
+            return names
+        start = int(painted.min())
+        end = int(painted.max())
+        step = (end - start) // FADE_FRAMES
+        for i in range(FADE_FRAMES):
             mask = np.ones_like(alpha_channel).astype(np.double)
             l = start + i * step
             r = start + (i + 1) * step
@@ -529,21 +834,44 @@ def get_blur(base_text: Path) -> list[list[Path]]:
     return names
 
 
+SILENT_DB = -80  # 到这个档位以下的音量一律按静音处理，直接归零
+
+
+def volume_filter(volume: Optional[float]) -> list[str]:
+    """把音量值转成 ffmpeg 参数
+
+    volume 是相对衰减，原始越响残留越高，光靠减够不了零；所以到静音档就直接把振幅写成 0。
+    """
+    if volume is None:
+        return []
+    if volume <= SILENT_DB:
+        return ['-af', 'volume=0']
+    return ['-af', f'volume={volume}dB']
+
+
 def cat_video(output: Path, segment_files: list[Path], config: ScriptConfig, param: list[str], stream_terminal: bool = True) -> Path:
-    """拼接视频"""
-    concat_file = config.cache_dir / output.with_suffix('.txt').name
-    with concat_file.open('w', encoding='utf-8') as f:
-        for seg in segment_files:
-            f.write(f"file '{seg.relative_to(config.cache_dir)}'\n")
-    new_concat_file = concat_file.with_stem(concat_file.stem + '_' + hashlib.md5(concat_file.read_bytes()).hexdigest()[:6])
-    new_concat_file.unlink(missing_ok=True)
-    concat_file.rename(new_concat_file)
+    """用 concat 滤镜拼接，并把时间戳归零
+
+    早先用 concat 分离器配 -c:v copy，因为各段音频对齐的差异，每个接缝处会留下约一帧的空档，
+    成片在那些位置会定格一帧。改成滤镜拼接，由 ffmpeg 重新生成连续时间戳。
+    """
     logger.info(f"🎥 拼接 {len(segment_files)} 个片段 → {output}")
+    inputs: list[str] = []
+    for seg in segment_files:
+        inputs += ['-i', seg.as_posix()]
+    count = len(segment_files)
+    pairs = ''.join(f'[{i}:v][{i}:a]' for i in range(count))
+    # 按帧序号重写时间戳，段内音频与视频长度不完全一致时会带出漂移，靠这一步拉平
+    graph = (
+        f"{pairs}concat=n={count}:v=1:a=1[cv][ca];"
+        "[cv]setpts=N/FRAME_RATE/TB[v];[ca]asetpts=N/SR/TB[a]"
+    )
     cmd = \
         [
             'ffmpeg', '-y', '-hide_banner',
-            '-f', 'concat',
-            '-i', new_concat_file.as_posix(),
+        ] + inputs + [
+            '-filter_complex', graph,
+            '-map', '[v]', '-map', '[a]',
         ] + param + [
             output.as_posix()
         ]
@@ -600,6 +928,9 @@ def add_bgm(bgm: Path, audio_advance_sec: float, input_path: Path, output_path: 
     max_rounds = 3
     for iteration in range(max_rounds):
         input_tp = measure_true_peak(current_audio)
+        if not math.isfinite(input_tp):
+            logger.warning('♻️ 混音是纯静音，真峰值无从归一，跳过增益闭环')
+            break
         dB = target_tp - input_tp
         if abs(dB) <= tolerance:
             logger.info(f"♻️ 真峰值已达标：input_tp={input_tp:.2f}dBTP，第 {iteration + 1} 轮收敛")
@@ -641,7 +972,22 @@ def add_bgm(bgm: Path, audio_advance_sec: float, input_path: Path, output_path: 
 @click.option('--cache-dir', default='cache_dir', type=click.Path(path_type=Path), help='缓存文件夹路径', show_default=True)
 @click.option('--output-dir', default='output_dir', type=click.Path(path_type=Path), help='输出文件夹路径', show_default=True)
 @click.option('--recode/--no-recode', default=False, help='额外输出一份重编码视频以提升兼容性', show_default=True)
-def cli(mygica_path: Path, root: Path, cache_dir: Path, output_dir: Path, font_file: Path, recode: bool) -> None:
+@click.option('--range', 'range_spec', default=None, help='只渲染指定的 Range，写法 3 或 3-5，1 起数，用于局部预览')
+@click.option('--min-font-ratio', default=0.03, type=float, help='字号相对屏高的下限，低于就告警', show_default=True)
+@click.option('--verify/--no-verify', default=True, help='把每个 clip 的首中末帧导出到校验目录', show_default=True)
+@click.option('--verify-dir', default='verify_dir', type=click.Path(path_type=Path), help='校验帧的落盘目录', show_default=True)
+def cli(
+    mygica_path: Path,
+    root: Path,
+    cache_dir: Path,
+    output_dir: Path,
+    font_file: Path,
+    recode: bool,
+    range_spec: str,
+    min_font_ratio: float,
+    verify: bool,
+    verify_dir: Path,
+) -> None:
     config = ScriptConfig(
         MyGICA_path=mygica_path,
         root=root,
@@ -649,6 +995,10 @@ def cli(mygica_path: Path, root: Path, cache_dir: Path, output_dir: Path, font_f
         output_dir=output_dir,
         fontfile=font_file,
         recode=recode,
+        range_spec=range_spec,
+        min_font_ratio=min_font_ratio,
+        verify=verify,
+        verify_dir=verify_dir,
     )
     work(config)
 

@@ -86,7 +86,7 @@ project_suffix = ".mp4"    # 输出文件格式
 go1 = 'D:\path\to\mygo1.mkv'
 # ...
 ji13 = 'D:\path\to\mujica13.mkv'
-black = 'cache_in\test_video_basic.mp4'  # 特殊 black 片段，运行 `0_gen_black.py` 生成，需要帧率等和项目一致，建议使用 black 填充未剪辑片段提交缓存利用率
+black = 'cache_in\test_video_basic.mp4'  # 可省略，省略时 black 由工具用 lavfi 现场合成，不必自备素材
 bgm = 'background_music.wav'  # 背景音乐，自动合并到视频中，必选
 ```
 
@@ -107,11 +107,15 @@ start = 2020
 end = 2098
 [[ranges.texts]]
 text = "火爆脾气一脚踢到钛合金"
+#extra = 'box=1:boxborderw=10'  # 可选，透传给 ffmpeg drawtext 的额外参数，写在后面可覆盖默认样式
+#start = 0     # 可选，相对本 Range 起点的帧偏移，只在 [start, end) 里显示
+#end = 40      # 可选，开区间，只给一端时按另一端补齐
 [[ranges.clips]]
 source = "go1"  # 可选 PREV 和 NEXT，表示接续上个或下个片段
 start = 29590
 end = 29626
 reason = "<选这个画面的理由，AI 必写>"  # 选这个画面的理由，会汇总到与视频同名的 .ass 外挂字幕
+#filters = 'hue=s=0,unsharp'  # 可选，透传给 ffmpeg 的滤镜串，不得改变帧数与帧率
 [[ranges.clips]]
 source = "go1"
 start = 30852  # 可省略一个 start 或 end，脚本会自动补全
@@ -120,6 +124,10 @@ volume = -50
 ```
 
 每个 `[[ranges.clips]]` 都必须写 `reason`，写明为什么选这个画面，AI 生成或修改剪辑时不得省略。编译后会汇总成与视频同名的 `.ass` 外挂字幕，播放视频即可实时核对每个画面。
+
+`Text` 不写 `start` / `end` 时整段显示，写了就只在那个帧区间里显示，同一个 Range 可以排多条时间不同的字幕，区间按 Range 起点算，允许重叠，重叠时一起显示。淡入淡出按每条 Text 自己的显示区间各算各的，一句连续显示的字幕被别的字幕从中间插进来，不会跟着淡出再淡入。
+
+`Clip` 的 `filters` 会拼进该片段的 ffmpeg 滤镜链，拿来调色、锐化、缩放都行，但不许改变帧数或帧率，否则会被帧数校验拦下。
 
 ---
 
@@ -144,6 +152,44 @@ volume = -50
 同一段画面在成片里出现两次，观众一眼就能看出是选帧重复，所以这里直接报错提醒，不等到成片出来才发现。
 
 `black` 源不参与检查，它只是纯色占位，重复使用没有意义。
+
+### 5. 帧数与帧率校验
+
+每个片段、每个 Range 拼接后、以及最终成片，都会用 ffprobe 逐帧数一遍，和配置声明的长度比对，帧数或帧率对不上就报错并指出是哪个片段。`Clip.filters` 里混进变速或改帧率的滤镜，会在这一步现形。
+
+### 6. 字号下限告警
+
+`fontsize` 占视频高度的比例低于 `--min-font-ratio` 时打 warning，该参数默认 0.03，屏高 1080 下也就是字号低于 33 就告警。用 `extra` 顶掉 `fontsize` 的写法不参与这个检查，告警只看字段本身。
+
+### 7. 校验帧导出
+
+每个 clip 渲染完成后，会把它的首、中、末三帧导到 `verify_dir`，文件名形如 `0585_00_c58a13_0026.png`，依次是所在 Range 起点、clip 序号、片段身份的摘要与帧号。摘要取自片段的源和取帧区间，所以同一个位置换了画面会导新图，不会拿上一次留下的旧图糊弄过去。只抽一个时间点很容易看走眼，三帧能看出这一段是否稳定、有没有夹进转场。`verify_dir` 是纯产物，随时可以整个删掉。
+
+### 8. 拼接用 concat 滤镜
+
+早先拼接走 concat 分离器配 `-c:v copy`。因为段内音频比视频短一点，AAC 帧对齐的差异会在每个接缝处留下约一帧的空档，成片在那里定格一帧。现在改用 concat 滤镜，再用 `setpts=N/FRAME_RATE/TB` 按帧序号重写时间戳，接缝处严丝合缝。代价是拼接必须重编码，不能再 copy，所以音频也一并编码。
+
+`check_video` 会顺带核对时间戳连续性，出现空档直接报错并指出帧号。
+
+### 9. 文本可单独指定字体
+
+`--font-file` 给整个工程定一种字体，某一段想换字体就在那个 `[[ranges.texts]]` 里写 `fontfile`，相对路径以项目根为基准，文件不存在会直接报错。亏损句用更重的字、标题句用手写体这类需求不用再拆工程。
+
+### 10. 文本样式可直接透传 drawtext 参数
+
+`Text` 只暴露了常用的那几个字段，剩下的 ffmpeg `drawtext` 选项用 `extra` 原样透传，写什么就是什么：
+
+```toml
+[[ranges.texts]]
+text = "你咋可能玩过我"
+extra = "box=1:boxcolor=black@0.5:boxborderw=12"  # 垫一块半透明底板
+```
+
+`extra` 拼在最后。ffmpeg 的同名选项后者覆盖前者，所以上面这种写法也能直接顶掉默认的 `fontsize`、`fontcolor`、`shadowx` 等等，默认样式不必改写。
+
+`extra` 的值不做转义，里面带逗号时要么整段用单引号包住，要么写成 `\,`，否则逗号会被当成两个滤镜的分界。
+
+`extra` 里的颜色是 ffmpeg 的颜色，写 `0x00FF00`、`white`、`black@0.5` 这些，`colors` 表里的中文别名只对 `fontcolor` 字段生效，写进 `extra` 会因为 ffmpeg 不认识而直接报错。
 
 > 天哪，这也太自动了！接下来就要自动生成 bug 了！
 
@@ -195,13 +241,32 @@ MyGICA 示例.MyGICA.toml
 
 输出文件将保存在 `output_dir/{{project_name}}`。默认只输出一份视频，需要更高兼容性的重编码版本时加 `--recode`。
 
+做 MAD 时常常只想看其中几句，用 `--range` 只渲染指定 Range 即可，输出名会带上 `_r3-5` 后缀，不会盖掉完整版。
+
+```powershell
+MyGICA 示例.MyGICA.toml --range 3-5    # 只渲染第 3 到第 5 个 Range，1 起数
+MyGICA 示例.MyGICA.toml --range 8      # 只渲染第 8 个 Range
+```
+
 素材、字体、缓存与输出目录都相对 TOML 所在目录解析，需要换基准时用 `--root` 指定。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--root` | TOML 所在目录 | 相对路径的解析基准 |
+| `--font-file` | `SC-Heavy.otf` | 字体文件 |
+| `--cache-dir` | `cache_dir` | 缓存目录 |
+| `--output-dir` | `output_dir` | 输出目录 |
+| `--recode` | 关闭 | 额外输出一份重编码视频 |
+| `--range` | 不过滤 | 只渲染指定的 Range |
+| `--min-font-ratio` | `0.03` | 字号相对屏高的下限 |
+| `--verify` | 开启 | 导出每个 clip 的首中末帧 |
+| `--verify-dir` | `verify_dir` | 校验帧的落盘目录 |
 
 ---
 
 ## 🧪 测试
 
-测试位于 `tests/`，覆盖配置解析与校验、帧率解析、帧与时间换算、TOML 转义、缓存清理策略，以及三个命令行入口的参数与报错行为。源码包 sdist 已包含 `tests/`，从源码仓库或 sdist 解包目录都能跑。
+测试位于 `tests/`，覆盖配置解析与校验、帧率解析、帧与时间换算、TOML 转义、字幕分层与淡入淡出排期、帧数计数、Range 选择解析、缓存清理策略，以及三个命令行入口的参数与报错行为。源码包 sdist 已包含 `tests/`，从源码仓库或 sdist 解包目录都能跑。
 
 ```powershell
 uv run pytest
@@ -228,6 +293,8 @@ cache_in/
 cache_dir/
 ├── seg_*.mp4              # 各段缓存片段
 └── concat_list.txt        # 拼接列表
+verify_dir/
+└── *.png                  # 每个 clip 的首中末帧，校验画面用，可整个删
 ```
 
 ---

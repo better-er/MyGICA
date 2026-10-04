@@ -1,6 +1,7 @@
 """A_compiler：纯函数与配置对象"""
 
 import shutil
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -8,16 +9,23 @@ import pytest
 
 from MyGICA.A_compiler import (
     ScriptConfig,
+    TextLayer,
     build_drawtext_filters,
     build_reason_ass,
+    check_frame,
     escape_ass_text,
     escape_filter_path,
     escape_toml_string,
+    export_clip_frames,
     frame_to_ass_time,
     frame_to_time,
     frame_to_timestamp,
     is_image,
+    parse_range_spec,
+    probe_gaps,
     resolve_path,
+    text_spans,
+    volume_filter,
 )
 from MyGICA.structure import Text
 
@@ -103,6 +111,7 @@ def test_build_drawtext_filters_maps_color_and_aligns_top_left():
     assert filters == (
         "drawtext=fontfile='font.otf':text='爱音':fontcolor=#77BBDD:fontsize=78"
         ":x=960:y=934:borderw=6:bordercolor=#333333"
+        ":shadowx=0:shadowy=0:shadowcolor=black@0.5"
     )
 
 
@@ -216,3 +225,172 @@ def test_build_reason_ass_returns_none_without_any_reason():
     for clip in config.project.ranges[0].clips:
         clip.reason = None
     assert build_reason_ass(config) is None
+
+
+def fake_names(prefix):
+    return [[Path(f'{prefix}in{i}.png') for i in range(10)], [Path(f'{prefix}out{i}.png') for i in range(10)]]
+
+
+def test_text_spans_fill_missing_ends():
+    spans = text_spans([Text(text='甲'), Text(text='乙', start=10), Text(text='丙', start=10, end=20)], 100)
+    assert [(a, b) for a, b, _ in spans] == [(0, 100), (10, 100), (10, 20)]
+
+
+def test_text_layer_fades_only_at_its_own_edges():
+    """一句连续显示的字幕，中间落进别的字幕也不该淡出再淡入"""
+    layer = TextLayer(label='甲', start=40, end=160, base=Path('base.png'), names=fake_names('a'))
+    assert layer.fade == 10
+    assert layer.at(40) == Path('ain0.png')
+    assert layer.at(49) == Path('ain9.png')
+    assert layer.at(50) == Path('base.png')
+    assert layer.at(60) == Path('base.png')
+    assert layer.at(100) == Path('base.png')
+    assert layer.at(150) == Path('aout9.png')
+    assert layer.at(159) == Path('aout0.png')
+
+
+def test_text_layer_fade_shrinks_for_short_span():
+    layer = TextLayer(label='乙', start=0, end=9, base=Path('base.png'), names=fake_names('b'))
+    assert layer.fade == 4
+    assert layer.at(0) == Path('bin0.png')
+    assert layer.at(4) == Path('base.png')
+    assert layer.at(5) == Path('bout3.png')
+    assert layer.at(8) == Path('bout0.png')
+
+
+def test_text_layer_without_room_to_fade_stays_solid():
+    layer = TextLayer(label='丙', start=0, end=1, base=Path('base.png'), names=[[], []])
+    assert layer.fade == 0
+    assert layer.at(0) == Path('base.png')
+
+
+@pytest.mark.parametrize(('spec', 'total', 'expected'), [
+    ('1', 5, [0]),
+    ('3', 5, [2]),
+    ('2-4', 5, [1, 2, 3]),
+    ('1-5', 5, [0, 1, 2, 3, 4]),
+])
+def test_parse_range_spec(spec, total, expected):
+    assert parse_range_spec(spec, total) == expected
+
+
+@pytest.mark.parametrize(('spec', 'total'), [('0', 5), ('6', 5), ('4-2', 5), ('abc', 5), ('', 5)])
+def test_parse_range_spec_rejects_bad_input(spec, total):
+    with pytest.raises(ValueError):
+        parse_range_spec(spec, total)
+
+
+def test_export_clip_frames_writes_first_mid_last(tmp_path):
+    if shutil.which('ffmpeg') is None:
+        pytest.skip('需要系统 PATH 中的 ffmpeg')
+    clip = tmp_path / 'clip.mp4'
+    subprocess.run(
+        ['ffmpeg', '-y', '-v', 'error', '-f', 'lavfi', '-i', 'color=c=red:s=64x36:r=24',
+         '-vframes', '24', clip.as_posix()],
+        check=True,
+    )
+    verify_dir = tmp_path / 'verify'
+    verify_dir.mkdir()
+    config = SimpleNamespace(verify=True, verify_dir=verify_dir)
+    outputs = export_clip_frames(clip, config, 24, '0000_00')
+    assert [p.name for p in outputs] == ['0000_00_0000.png', '0000_00_0012.png', '0000_00_0023.png']
+    assert all(p.exists() and p.stat().st_size > 0 for p in outputs)
+
+
+def test_export_clip_frames_can_be_disabled(tmp_path):
+    config = SimpleNamespace(verify=False, verify_dir=tmp_path / 'verify')
+    assert export_clip_frames(Path('not-exist.mp4'), config, 24, '0000_00') == []
+
+
+def test_export_clip_frames_reuses_existing_files(tmp_path):
+    verify_dir = tmp_path / 'verify'
+    verify_dir.mkdir()
+    for name in ('0000_00_0000.png', '0000_00_0012.png', '0000_00_0023.png'):
+        (verify_dir / name).write_bytes(b'x')
+    config = SimpleNamespace(verify=True, verify_dir=verify_dir)
+    # 片段文件不存在，但三帧都在，应当直接复用而不去调 ffmpeg
+    outputs = export_clip_frames(Path('not-exist.mp4'), config, 24, '0000_00')
+    assert len(outputs) == 3
+
+
+def test_volume_filter_passes_through_normal_values():
+    assert volume_filter(None) == []
+    assert volume_filter(0) == ['-af', 'volume=0dB']
+    assert volume_filter(-12.5) == ['-af', 'volume=-12.5dB']
+
+
+def test_volume_filter_zeroes_out_silent_values():
+    assert volume_filter(-80) == ['-af', 'volume=0']
+    assert volume_filter(-120) == ['-af', 'volume=0']
+
+
+def test_build_drawtext_applies_shadow():
+    project = SimpleNamespace(colors={})
+    out = build_drawtext_filters(
+        [Text(text='测试', shadowx=2, shadowy=2, shadowcolor='black@0.5')], project, Path('g.ttf'))
+    assert 'shadowx=2' in out
+    assert 'shadowy=2' in out
+    assert 'shadowcolor=black@0.5' in out
+
+
+def test_build_drawtext_uses_per_text_font(tmp_path):
+    mine = tmp_path / 'mine.ttf'
+    mine.write_bytes(b'x')
+    project = SimpleNamespace(colors={})
+    out = build_drawtext_filters([Text(text='测试', fontfile=str(mine))], project, Path('global.ttf'))
+    assert 'mine.ttf' in out
+    assert 'global.ttf' not in out
+
+
+def test_build_drawtext_falls_back_to_global_font():
+    project = SimpleNamespace(colors={})
+    out = build_drawtext_filters([Text(text='测试')], project, Path('global.ttf'))
+    assert 'global.ttf' in out
+
+
+def test_build_drawtext_appends_extra_after_defaults():
+    """自定义参数必须排在默认值之后，同名选项后者覆盖前者才能生效"""
+    project = SimpleNamespace(colors={})
+    out = build_drawtext_filters([Text(text='测试', extra='box=1:boxborderw=10')], project, Path('g.ttf'))
+    assert out.endswith(':box=1:boxborderw=10')
+
+
+def test_build_drawtext_ignores_empty_extra():
+    project = SimpleNamespace(colors={})
+    out = build_drawtext_filters([Text(text='测试')], project, Path('g.ttf'))
+    assert out.endswith('shadowcolor=black@0.5')
+
+
+def test_probe_gaps_returns_empty_for_clean_video(tmp_path):
+    if shutil.which('ffmpeg') is None:
+        pytest.skip('需要系统 PATH 中的 ffmpeg')
+    clip = tmp_path / 'clip.mp4'
+    subprocess.run(
+        ['ffmpeg', '-y', '-v', 'error', '-f', 'lavfi', '-i', 'color=c=red:s=64x36:r=24000/1001',
+         '-frames:v', '20', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', clip.as_posix()],
+        check=True)
+    assert probe_gaps(clip) == []
+
+
+def test_probe_gaps_finds_dropped_frame(tmp_path):
+    if shutil.which('ffmpeg') is None:
+        pytest.skip('需要系统 PATH 中的 ffmpeg')
+    clip = tmp_path / 'clip.mp4'
+    subprocess.run(
+        ['ffmpeg', '-y', '-v', 'error', '-f', 'lavfi', '-i', 'color=c=red:s=64x36:r=24000/1001',
+         '-frames:v', '20', '-vf', "select='not(eq(mod(n\\,5)\\,3))'", '-fps_mode', 'passthrough',
+         '-c:v', 'libx264', '-pix_fmt', 'yuv420p', clip.as_posix()],
+        check=True)
+    assert probe_gaps(clip), '丢掉几帧后应当能查出时间戳不连续'
+
+
+def test_check_frame_counts_rendered_frames(tmp_path):
+    if shutil.which('ffmpeg') is None:
+        pytest.skip('需要系统 PATH 中的 ffmpeg')
+    out = tmp_path / 'black.mp4'
+    subprocess.run(
+        ['ffmpeg', '-y', '-v', 'error', '-f', 'lavfi', '-i', 'color=c=black:s=64x36:r=24',
+         '-vframes', '24', out.as_posix()],
+        check=True,
+    )
+    assert check_frame(out) == 24

@@ -12,6 +12,7 @@ wheels/
 
 cache_dir
 cache_in
+verify_dir
 time_data.pkl
 
 # 本地临时文件与调试产物，散落的杂项统一放 try/

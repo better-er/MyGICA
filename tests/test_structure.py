@@ -7,8 +7,10 @@ from loguru import logger
 from MyGICA.structure import (
     Clip,
     Range,
+    Text,
     check,
     check_reused_frames,
+    describe_range,
     parse_config,
     parse_fps,
 )
@@ -273,3 +275,48 @@ def test_parse_config_reports_reused_frames(error_logs):
     ]))
     assert len(error_logs) == 1
     assert '重复使用' in error_logs[0]
+
+
+def test_black_source_is_builtin_without_material():
+    """black 是内置占位源，sources 里没准备素材也应该能解析"""
+    project = parse_config(make_config(
+        sources={'bgm': 'bgm.wav', 'go1': 'go1.mkv'},
+        ranges=[{'start': 0, 'end': 100, 'clips': [{'source': 'black', 'start': 0, 'end': 100}]}],
+    ))
+    assert project.ranges[0].clips[0].source == 'black'
+    assert project.ranges[0].clips[0].volume == -50
+
+
+def test_describe_range_carries_clips_and_texts():
+    rng = Range(start=100, end=200, clips=[Clip(source='go1', start=0, end=100)], texts=[Text(text='爱音')])
+    line = describe_range(3, rng)
+    assert '第 3 个 Range 100-200' in line
+    assert 'go1[0:100]' in line
+    assert '爱音' in line
+
+
+def test_text_time_range_must_fit_in_range():
+    with pytest.raises(ValueError, match='显示区间'):
+        parse_config(make_config(ranges=[
+            {'start': 0, 'end': 100,
+             'clips': [{'source': 'go1', 'start': 0, 'end': 100}],
+             'texts': [{'text': '爱音', 'start': 80, 'end': 120}]},
+        ]))
+
+
+def test_text_with_only_start_keeps_end_empty():
+    project = parse_config(make_config(ranges=[
+        {'start': 0, 'end': 100,
+         'clips': [{'source': 'go1', 'start': 0, 'end': 100}],
+         'texts': [{'text': '爱音', 'start': 30}]},
+    ]))
+    text = project.ranges[0].texts[0]
+    assert (text.start, text.end) == (30, None)
+
+
+def test_clip_filters_is_parsed():
+    project = parse_config(make_config(ranges=[
+        {'start': 0, 'end': 100,
+         'clips': [{'source': 'go1', 'start': 0, 'end': 100, 'filters': 'hue=s=0'}]},
+    ]))
+    assert project.ranges[0].clips[0].filters == 'hue=s=0'

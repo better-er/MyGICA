@@ -35,9 +35,10 @@ class Clip:
     source: str  # source 的 key
     start: Optional[int] = None
     end: Optional[int] = None
-    volume: Optional[float] = None  # 音量，范围 -50 到 0，默认 0
+    volume: Optional[float] = None  # 音量，-80 及以下按静音处理，直接归零
     sound: Optional[str] = None  # sound 的 key
     reason: Optional[str] = None  # 选这个画面的理由，编译后会写入同名外挂字幕
+    filters: Optional[str] = None  # 透传给 ffmpeg 的滤镜串，必须不改变帧数，否则会被帧数校验拦下
 
     def __post_init__(self):
         if self.source == 'black':
@@ -53,7 +54,15 @@ class Text:
     fontcolor: str = 'white'
     borderw: int = 6
     bordercolor: str = '#333333'
+    fontfile: Optional[str] = None  # 这一段单用别的字体，留空则跟工程的全局字体走
+    shadowx: int = 0  # 阴影横向偏移，正数往右
+    shadowy: int = 0  # 阴影纵向偏移，正数往下
+    shadowcolor: str = 'black@0.5'  # 阴影颜色，支持 颜色@透明度
+    # 追加到 drawtext 末尾的额外参数，写在后面的同名参数会覆盖前面的默认值，想加默认没暴露的 box、alpha 等就写这里
+    extra: Optional[str] = None
     align: Literal['center', 'upper left'] = 'center'
+    start: Optional[int] = None  # 相对 Range 起点的帧偏移，留空表示从 Range 头开始显示
+    end: Optional[int] = None  # 相对 Range 起点的帧偏移，开区间，留空表示显示到 Range 尾
 
 
 @dataclass
@@ -62,6 +71,19 @@ class Range:
     end: int
     clips: list[Clip] = field(default_factory=list)
     texts: list[Text] = field(default_factory=list)
+
+
+def describe_range(index: int, rng: Range) -> str:
+    """把一个 Range 压成一行，供报错时定位，免得在长配置里数第几个 Range"""
+    clips = ' | '.join(
+        f"[{i}]{clip.source}[{clip.start}:{clip.end}]"
+        for i, clip in enumerate(rng.clips, start=1)
+    )
+    texts = ' / '.join(text.text for text in rng.texts)
+    return (
+        f"第 {index} 个 Range {rng.start}-{rng.end} 长 {rng.end - rng.start} "
+        f"clips: {clips or '无'} texts: {texts or '无'}"
+    )
 
 
 @dataclass
@@ -145,21 +167,22 @@ class ProjectConfig:
         # 检查 Clip 的 source 是否在 sources 中
         NEXT = 'NEXT'  # noqa: N806
         PREV = 'PREV'  # noqa: N806
-        all_sources = set(self.sources.keys()) | {NEXT, PREV}
+        # black 是内置占位源，不需要用户在 sources 里准备素材
+        all_sources = set(self.sources.keys()) | {NEXT, PREV, 'black'}
         for index, r in enumerate(self.ranges, start=1):
             for clip in r.clips:
-                check(clip.source in all_sources, f"第 {index} 个 Range 内 Clip source '{clip.source}' 不在 sources 中")
+                check(clip.source in all_sources, f"Clip source '{clip.source}' 不在 sources 中：{describe_range(index, r)}")
 
         # 检查 Text 的 fontcolor 是否在 colors 中
         all_colors = set(self.colors.keys()) | {'white', 'black'}
         for index, r in enumerate(self.ranges, start=1):
             for text in r.texts:
-                check(text.fontcolor in all_colors, f"第 {index} 个 Range 内 Text fontcolor '{text.fontcolor}' 不在 colors 中")
+                check(text.fontcolor in all_colors, f"Text fontcolor '{text.fontcolor}' 不在 colors 中：{describe_range(index, r)}")
 
         # 检查 Clip 的 start 和 end 为 None 的总数不超过 1
         for index, r in enumerate(self.ranges, start=1):
             none_count = sum(1 for clip in r.clips if clip.start is None and clip.end is None)
-            check(none_count <= 1, f"第 {index} 个 Range 内 start 和 end 同时为 None 的 Clip 不能超过 1 个")
+            check(none_count <= 1, f"start 和 end 同时为 None 的 Clip 不能超过 1 个：{describe_range(index, r)}")
 
         # 如果某个 Range 内没有任何 Clip，则自动延续上一个 Range 的最后一个 Clip
         last_source = 'black'
@@ -180,7 +203,7 @@ class ProjectConfig:
                 last_volume = r.clips[0].volume
                 r.clips.clear()
             count_both_none = sum(1 for clip in r.clips if clip.start is None and clip.end is None)
-            check(count_both_none <= 1, f"第 {range_index} 个 Range 内 start 和 end 同时为 None 的 Clip 不能超过 1 个, {r=}")
+            check(count_both_none <= 1, f"start 和 end 同时为 None 的 Clip 不能超过 1 个：{describe_range(range_index, r)}")
             if len(r.clips) == 0:
                 logger.debug(f"日志: Range {r} 内没有任何 Clip, 自动延续上一个 Clip")
                 r.clips.append(Clip(source=last_source, start=last_end if last_source != 'black' else 0, volume=last_volume))
@@ -197,8 +220,8 @@ class ProjectConfig:
                 if clip.end is None:
                     clip.end = clip.start + (r.end - r.start - sum_length)
                     sum_length += (clip.end - clip.start)
-                check(clip.start <= clip.end, f"第 {range_index} 个 Range 内 Clip 的 start 必须小于等于 end, {clip=}")
-            check(sum_length == r.end - r.start, f"第 {range_index} 个 Range 内 Clip 的总长度必须等于 Range 的长度 {r}")
+                check(clip.start <= clip.end, f"Clip 的 start 必须小于等于 end：{describe_range(range_index, r)}")
+            check(sum_length == r.end - r.start, f"Clip 总长度与 Range 长度不符：{describe_range(range_index, r)}")
             last_source = r.clips[-1].source
             last_end = r.clips[-1].end
             last_volume = r.clips[-1].volume
@@ -217,9 +240,12 @@ class ProjectConfig:
                 rest = (r.end - r.start) - sum((clip.end - clip.start) for clip in r.clips)
                 clip = Clip(source=last_source, start=last_start - rest if last_start != 'black' else 0, volume=last_volume)
                 clip.end = clip.start + rest
-                check(clip.start <= clip.end, f"倒数第 {reverse_index} 个 Range 内 Clip 的 start 必须小于等于 end, {clip=}")
+                check(clip.start <= clip.end, f"Clip 的 start 必须小于等于 end：{describe_range(len(self.ranges) - reverse_index + 1, r)}")
                 r.clips.append(clip)
-            check((r.end - r.start) == sum((clip.end - clip.start) for clip in r.clips), f"倒数第 {reverse_index} 个 Range 内 Clip 的总长度必须等于 Range 的长度 {r}")
+            check(
+                (r.end - r.start) == sum((clip.end - clip.start) for clip in r.clips),
+                f"Clip 总长度与 Range 长度不符：{describe_range(len(self.ranges) - reverse_index + 1, r)}",
+            )
             last_source = r.clips[0].source
             last_start = r.clips[0].start
             last_volume = r.clips[0].volume
@@ -242,22 +268,35 @@ class ProjectConfig:
             )
         # 3 检查 Clip 的 start 和 end 不为 None
         for index, r in enumerate(self.ranges, start=1):
-            for clip in r.clips:
-                check(clip.start is not None and clip.end is not None, f"第 {index} 个 Range 内 Clip 的 start 和 end 不能为空, {clip=}")
-                check(clip.start <= clip.end, f"第 {index} 个 Range 内 Clip 的 start 必须小于等于 end, {clip=}")
+            for clip_index, clip in enumerate(r.clips, start=1):
+                where = f"{describe_range(index, r)} 的第 {clip_index} 个 Clip"
+                check(clip.start is not None and clip.end is not None, f"Clip 的 start 和 end 不能为空：{where}")
+                check(clip.start <= clip.end, f"Clip 的 start 必须小于等于 end：{where}")
         # 4 检查每个 Range 内 Clip 的 start 和 end 的总长度必须等于 Range 的长度
         for index, r in enumerate(self.ranges, start=1):
-            check((r.end - r.start) == sum((clip.end - clip.start) for clip in r.clips), f"第 {index} 个 Range 内 Clip 的总长度必须等于 Range 的长度 {r}")
+            check((r.end - r.start) == sum((clip.end - clip.start) for clip in r.clips), f"Clip 总长度与 Range 长度不符：{describe_range(index, r)}")
         # 5 检查 Clip 的 source 是否在 sources 中
         for index, r in enumerate(self.ranges, start=1):
-            for clip in r.clips:
-                check(clip.source in all_sources, f"第 {index} 个 Range 内 Clip source '{clip.source}' 不在 sources 中")
+            for clip_index, clip in enumerate(r.clips, start=1):
+                check(clip.source in all_sources, f"Clip source '{clip.source}' 不在 sources 中：{describe_range(index, r)} 的第 {clip_index} 个 Clip")
         # 6 检查 Text 的 fontcolor 是否在 colors 中
         for index, r in enumerate(self.ranges, start=1):
-            for text in r.texts:
-                check(text.fontcolor in all_colors, f"第 {index} 个 Range 内 Text fontcolor '{text.fontcolor}' 不在 colors 中")
+            for text_index, text in enumerate(r.texts, start=1):
+                check(text.fontcolor in all_colors, f"Text fontcolor '{text.fontcolor}' 不在 colors 中：{describe_range(index, r)} 的第 {text_index} 条 Text")
+        # 7 检查 Text 的显示区间落在 Range 内，缺一个端点时按另一端补齐
+        for index, r in enumerate(self.ranges, start=1):
+            length = r.end - r.start
+            for text_index, text in enumerate(r.texts, start=1):
+                if text.start is None and text.end is None:
+                    continue
+                t0 = 0 if text.start is None else text.start
+                t1 = length if text.end is None else text.end
+                check(
+                    0 <= t0 < t1 <= length,
+                    f"Text 显示区间 [{t0}, {t1}) 必须落在 [0, {length}) 内：{describe_range(index, r)} 的第 {text_index} 条 Text",
+                )
 
-        # 7 检查同一个源的同一帧是否被多个 Clip 重复使用
+        # 8 检查同一个源的同一帧是否被多个 Clip 重复使用
         check_reused_frames(self.ranges)
 
 
