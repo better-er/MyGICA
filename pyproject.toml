@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "MyGICA"
-version = "1.0-alpha"
+version = "0.1.0"
 description = "剪辑 MyGICA 视频的 MyGICA 工具, MyGICA 即 MyGO!!!!! & MUJICA"
 readme = "README.md"
 license = "AGPL-3.0-only"
@@ -14,10 +14,14 @@ requires-python = ">=3.11"
 classifiers = [
     # 编程语言
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     # 系统无关性
     "Operating System :: OS Independent",
     # 项目状态
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     # 目标用户
     "Topic :: Scientific/Engineering",
     "Topic :: Multimedia :: Video",
@@ -39,6 +43,9 @@ dependencies = [
 MyGICA = "MyGICA.A_compiler:cli"
 srt2MyGICA = "MyGICA.srt2MyGICA:cli"
 MyGICA_cache_cleaner = "MyGICA.time_based_cache_cleaner:cli"
+
+[project.urls]
+Repository = "https://github.com/better-er/MyGICA"
 
 [dependency-groups]
 dev = [

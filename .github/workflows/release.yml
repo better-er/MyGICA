@@ -1,0 +1,126 @@
+name: Release
+
+# 推送形如 vX.Y.Z 的 tag 时自动发版：先把 pyproject.toml 与 uv.lock 的版本兜底对齐到
+# tag 号，不一致才提交回 main → 装依赖 → 测试 → 构建 → 发布 PyPI → 生成 Release 草稿。
+# 人只需打一个 tag，其余自动衔接。
+# PyPI 发布走 Trusted Publishing，不需要 PYPI_TOKEN；未在 PyPI 侧绑定信任关系时发布会失败。
+on:
+  push:
+    tags:
+      - 'v*'
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Publish ${{ github.ref_name }} to PyPI
+    runs-on: ubuntu-latest
+    # id-token: write 供 Trusted Publishing 换取 PyPI 临时凭证，无需 PYPI_TOKEN。
+    # 必须放在 job 级，GitHub 才会向该 job 注入 ACTIONS_ID_TOKEN_REQUEST_*。
+    permissions:
+      contents: write
+      id-token: write
+    # 只有 tag 触发；fork 永不带 tag，这条仅作兜底。
+    if: startsWith(github.ref, 'refs/tags/v')
+    # 绑定 GitHub Actions environment「release」，使 OIDC subject 稳定为 environment:release，
+    # PyPI 侧 Trusted Publisher 必须填相同的 Environment 名。
+    environment: release
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # 回写 main 需要完整历史，故拉全量。
+          fetch-depth: 0
+          # 默认 GITHUB_TOKEN 在分支保护下会被拒，此处显式传 token。
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # uv 与 python 都锁到本地那份：CI 跑矩阵，发版只认这一个版本。
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: 0.12.8
+          enable-cache: true
+          python-version: '3.14'
+
+      # 前置守卫：仅当该 tag 版本尚未发布到 PyPI 时才继续发版。
+      # 补历史 tag 时对应版本早已在 PyPI 上，重复上传会被拒，且版本回写会把 main 改回旧号。
+      # 这个接口只读，无需凭证。
+      - name: Skip when tag version already published
+        id: published
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME#v}"
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/MyGICA/$TAG/json")
+          if [ "$CODE" = "200" ]; then
+            echo "已存在 MyGICA $TAG，跳过发布"
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "未发布 MyGICA $TAG，继续"
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # 版本号以源码里的 pyproject.toml 为准，正常随改动一起提交，发版前与将要打的 tag 对齐。
+      # 这一步只是兜底：忘改或写错时在此对齐 tag 号，再提交回 main。
+      # uv.lock 里也记着本包版本，必须一并跟上，否则后面 uv sync --frozen 会因锁不一致直接失败。
+      - name: Sync version to main
+        if: steps.published.outputs.published != 'true'
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME#v}"
+          echo "target version = $TAG"
+
+          # 切到 main 再改版本，避免在 detached tag 上提交。
+          git checkout main
+          git config user.name  github-actions[bot]
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # 只动 [project] 里那一行 version，其余原样保留。
+          sed -i "s|^version = .*|version = \"$TAG\"|" pyproject.toml
+          uv lock
+
+          git add pyproject.toml uv.lock
+          git diff --cached --quiet || {
+            git commit -m "chore: release $TAG 同步 pyproject.toml 版本 [skip ci]"
+            git push origin main
+          }
+
+      - name: Install ffmpeg
+        if: steps.published.outputs.published != 'true'
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Install dependencies
+        if: steps.published.outputs.published != 'true'
+        run: uv sync --frozen
+
+      # 发布前的最后一道门，与 CI 跑同一套测试。
+      - name: Test
+        if: steps.published.outputs.published != 'true'
+        run: uv run pytest
+
+      - name: Build
+        if: steps.published.outputs.published != 'true'
+        run: uv build
+
+      # 与 CI 共用同一份清单，两处必须一致。
+      - name: Verify build outputs
+        if: steps.published.outputs.published != 'true'
+        run: |
+          test "$(ls dist/*.whl | wc -l)" -eq 1
+          test "$(ls dist/*.tar.gz | wc -l)" -eq 1
+          ls -l dist/
+
+      # Trusted Publishing：PyPI 凭 workflow 的 OIDC 身份直接授权，无需 PYPI_TOKEN。
+      # 上传失败最常见的原因是 PyPI 侧没绑定，或 environment 名对不上。
+      - name: Publish to PyPI
+        if: steps.published.outputs.published != 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+      - name: Create GitHub Release draft
+        if: steps.published.outputs.published != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true

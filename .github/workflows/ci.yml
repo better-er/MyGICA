@@ -1,0 +1,63 @@
+name: CI
+
+# 每次 push 到主分支、任何 PR 包括来自 fork 的 PR 都自动跑完整检查。
+# 本包是 src 布局，CI 必须按 pyproject.toml 装依赖，测试与打包两关都得过。
+# PR 检查即门禁：pytest 与 uv build 全绿才允许合并。
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    # fork PR 也可触发；此工作流不读写仓库 secrets，fork 环境下安全。
+    branches:
+      - main
+
+# 同一分支或 PR 上排队的新提交会取消正在跑的旧任务，避免资源浪费。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: pytest · build · py${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      # 一个版本挂了不代表别的也挂，先让整轮跑完再下结论
+      fail-fast: false
+      matrix:
+        # 覆盖 requires-python 声明的整段范围，下限与本地 pin 都得在列
+        python: ['3.11', '3.12', '3.13', '3.14']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # uv 版本与本地 uv --version 锁死；python 版本由矩阵给，两者都写明。
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: 0.12.8
+          enable-cache: true
+          python-version: ${{ matrix.python }}
+
+      # 多数用例要跑真的 ffmpeg，缺了会被整批 skip，等于白跑。
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      # --frozen 保证 CI 用的是 uv.lock 里锁定的版本，与本地一致。
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Test
+        run: uv run pytest
+
+      # 打包单独占一关，uv_build 的模块名与源码目录写错会在这里现形，
+      # 而不是等发版当天才发现。
+      - name: Build
+        run: uv build
+
+      # 与 release 共用同一份清单，两处必须一致。
+      - name: Verify build outputs
+        run: |
+          test "$(ls dist/*.whl | wc -l)" -eq 1
+          test "$(ls dist/*.tar.gz | wc -l)" -eq 1
+          ls -l dist/
