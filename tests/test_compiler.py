@@ -1,5 +1,6 @@
 """A_compiler：纯函数与配置对象"""
 
+import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -10,8 +11,10 @@ import pytest
 from MyGICA.A_compiler import (
     ScriptConfig,
     TextLayer,
+    align_duration,
     build_drawtext_filters,
     build_reason_ass,
+    cat_video_copy,
     check_frame,
     escape_ass_text,
     escape_filter_path,
@@ -149,13 +152,11 @@ def test_script_config_resolves_paths_relative_to_toml(project_dir):
     assert config.project.sources['go1'] == str((project_dir / 'go1.mkv').resolve())
 
 
-def test_script_config_defaults_to_no_recode(project_dir):
+def test_script_config_has_no_recode_left(project_dir):
+    """重编码那一档已经删掉，拼接改走直接复制，不该再有相关字段"""
     config = ScriptConfig(MyGICA_path=project_dir / '项目.MyGICA.toml', fontfile=Path('font.otf'))
-    assert config.recode is False
-    assert config.video_preset_cat_recode == [
-        '-r', '24000/1001',
-        '-c:v', 'hevc_nvenc', '-crf', '18', '-pix_fmt', 'p010le',
-    ]
+    assert not hasattr(config, 'recode')
+    assert not hasattr(config, 'video_preset_cat_recode')
 
 
 def test_script_config_root_overrides_base_dir(project_dir, tmp_path):
@@ -382,6 +383,60 @@ def test_probe_gaps_finds_dropped_frame(tmp_path):
          '-c:v', 'libx264', '-pix_fmt', 'yuv420p', clip.as_posix()],
         check=True)
     assert probe_gaps(clip), '丢掉几帧后应当能查出时间戳不连续'
+
+
+def make_segment(tmp_path, name, frames, audio_seconds):
+    """造一段音频比视频长的片段，正是接缝空档的来源
+
+    视频和音频分开编，再用 -c copy 混流。一起编的话，视频一到帧数上限整条输出就收尾，
+    音频会被一起截断，做不出时长不一致的片段。
+    """
+    video = tmp_path / f'{name}_video.mp4'
+    audio = tmp_path / f'{name}_audio.m4a'
+    seg = tmp_path / name
+    subprocess.run([
+        'ffmpeg', '-y', '-v', 'error', '-f', 'lavfi',
+        '-i', 'color=c=red:s=64x36:r=24000/1001',
+        '-vframes', str(frames), '-c:v', 'libx264', '-pix_fmt', 'yuv420p', video.as_posix(),
+    ], check=True)
+    subprocess.run([
+        'ffmpeg', '-y', '-v', 'error', '-f', 'lavfi',
+        '-i', f'sine=frequency=440:sample_rate=44100:duration={audio_seconds}',
+        '-c:a', 'aac', '-ar', '44100', '-ac', '2', audio.as_posix(),
+    ], check=True)
+    subprocess.run([
+        'ffmpeg', '-y', '-v', 'error',
+        '-i', video.as_posix(), '-i', audio.as_posix(),
+        '-map', '0:v', '-map', '1:a', '-c', 'copy', seg.as_posix(),
+    ], check=True)
+    return seg
+
+
+def test_align_duration_trims_container_to_video(tmp_path):
+    if shutil.which('ffmpeg') is None:
+        pytest.skip('需要系统 PATH 中的 ffmpeg')
+    seg = make_segment(tmp_path, 'seg.mp4', 24, 1.1)
+    config = SimpleNamespace(project=SimpleNamespace(fps='24000/1001'), cache_dir=tmp_path)
+    before = float(json.loads(subprocess.run(
+        ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'json', seg.as_posix()],
+        capture_output=True, text=True).stdout)['format']['duration'])
+    assert before > 24 * 1001 / 24000, '造的片段音频本来就该比视频长'
+    aligned = align_duration(seg, config)
+    after = float(json.loads(subprocess.run(
+        ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'json', aligned.as_posix()],
+        capture_output=True, text=True).stdout)['format']['duration'])
+    assert after == pytest.approx(24 * 1001 / 24000, abs=1e-6)
+    assert check_frame(aligned) == 24
+
+
+def test_cat_video_copy_leaves_no_gap(tmp_path):
+    if shutil.which('ffmpeg') is None:
+        pytest.skip('需要系统 PATH 中的 ffmpeg')
+    config = SimpleNamespace(project=SimpleNamespace(fps='24000/1001'), cache_dir=tmp_path)
+    segs = [make_segment(tmp_path, f's{i}.mp4', 24, 1.1) for i in range(3)]
+    out = cat_video_copy(tmp_path / 'out.mp4', [align_duration(s, config) for s in segs], config)
+    assert check_frame(out) == 72
+    assert probe_gaps(out) == [], '对齐之后直接复制拼接不该留下空档'
 
 
 def test_check_frame_counts_rendered_frames(tmp_path):

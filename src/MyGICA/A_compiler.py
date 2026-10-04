@@ -33,7 +33,6 @@ class ScriptConfig:
     video_height: int = 1080
     cache_dir: Path = Path('cache_dir')
     output_dir: Path = Path('output_dir')
-    recode: bool = False  # 是否额外输出一份重编码视频，默认关闭，避免每次编译都多跑一遍
     range_spec: Optional[str] = None  # 只渲染指定 Range，写法 3 或 3-5，1 起数，用于局部预览
     min_font_ratio: float = 0.03  # 字号相对屏高的下限，低于就告警
     verify: bool = True  # 是否把每个 clip 的首中末帧导出到校验目录
@@ -41,7 +40,6 @@ class ScriptConfig:
     video_preset: list[str] = field(default_factory=lambda: ['-c:v', 'hevc_nvenc', '-cq', '18', '-pix_fmt', 'p010le'])
     # 走 concat 滤镜时音频也必须一起编码，-c:a copy 与滤镜链不能共存
     video_preset_cat: list[str] = field(default_factory=lambda: ['-c:v', 'hevc_nvenc', '-cq', '18', '-pix_fmt', 'p010le', '-c:a', 'aac', '-b:a', '192k'])
-    video_preset_cat_recode: list[str] = field(default_factory=lambda: ['-c:v', 'hevc_nvenc', '-crf', '18', '-pix_fmt', 'p010le'])
 
     def __post_init__(self):
         check(self.MyGICA_path.suffixes[-2:] == ['.MyGICA', '.toml'], 'need .MyGICA.toml file')
@@ -102,7 +100,6 @@ class ScriptConfig:
         if output_suffix:
             output_name = output_name.with_stem(output_name.stem + output_suffix)
         self.output = self.output_dir / output_name.name
-        self.video_preset_cat_recode = ['-r', self.project.fps] + self.video_preset_cat_recode
 
         # 字号下限按工作区的画面字号规范，低于屏高 3% 的小字读不清
         for position, rng in enumerate(self.project.ranges):
@@ -171,14 +168,16 @@ def parse_range_index(raw: str, total: int) -> int:
 
 
 def probe_frames(path: Path) -> tuple[list[int], Fraction]:
-    """一次 ffprobe 同时拿到全部帧的时间戳与帧率，帧数就是时间戳的个数
+    """一次 ffprobe 拿到全部帧的时间戳与帧率，帧数就是时间戳的个数
 
-    帧数与时间戳分两次调用会把这个文件解码两遍，长一点的成片上就是好几秒的差别。
+    读的是包不是帧：包的时间戳就在容器的索引里，不用把画面解出来，995 帧的成片从五秒半
+    降到七十毫秒。一个包一帧是 mp4、mkv、mov 的常态，所以包的个数就是帧数。
+    包按解码顺序排，带 B 帧时前后会乱，排序之后才是显示顺序。
     """
     cmd = [
         'ffprobe', '-v', 'error',
         '-select_streams', 'v:0',
-        '-show_entries', 'stream=r_frame_rate:frame=pts',
+        '-show_entries', 'stream=r_frame_rate:packet=pts',
         '-of', 'json',
         path.as_posix(),
     ]
@@ -190,12 +189,12 @@ def probe_frames(path: Path) -> tuple[list[int], Fraction]:
     raw_rate = streams[0].get('r_frame_rate', '')
     check('/' in raw_rate, f"ffprobe 未返回帧率: {path}\n{res.stdout[:200]}")
     pts: list[int] = []
-    for frame in data.get('frames', []):
-        value = str(frame.get('pts', ''))
+    for packet in data.get('packets', []):
+        value = str(packet.get('pts', ''))
         check(value.lstrip('-').isdigit(), f"ffprobe 返回了无法解析的时间戳 {value!r}: {path}")
         pts.append(int(value))
     check(pts, f"ffprobe 未返回任何帧: {path}")
-    return pts, Fraction(raw_rate)
+    return sorted(pts), Fraction(raw_rate)
 
 
 def probe_video(path: Path) -> tuple[int, Fraction]:
@@ -481,9 +480,8 @@ def work(config: ScriptConfig) -> None:
     # =============================
     # 拼接所有片段
     # =============================
-    # no_bgm = config.output.with_stem(config.output.stem + '_no_bgm')
     no_bgm = config.cache_dir / f"no_bgm.mp4"
-    no_bgm = cat_video(no_bgm, segment_files, config, config.video_preset_cat)
+    no_bgm = cat_video_copy(no_bgm, segment_files, config)
 
     # =============================
     # 拼接完成后添加背景音乐 / 在片段中添加背景音乐跳过此处
@@ -504,19 +502,6 @@ def work(config: ScriptConfig) -> None:
     logger.info(f"✅ 成片帧数与帧率校验通过：{expect_frames} 帧 @ {project.fps}")
 
     logger.info(f"\n\n\n🎉🎉🎉 全部处理完成！输出文件: {config.output} 🎉🎉🎉\n\n")
-
-    # 重编码，仅在显式开启 --recode 时执行
-    if config.recode:
-        logger.info("♻️ 开始重编码输出文件，增加兼容性，若输出文件已经兼容可无视此步骤")
-        output_recode = config.cache_dir / f"output_recode.mp4"
-        no_bgm_recode = config.cache_dir / f"no_bgm_recode.mp4"
-        new_no_bgm_recode = cat_video(no_bgm_recode, segment_files, config, config.video_preset_cat_recode)
-        new_output_recode = add_bgm(Path(project.sources['bgm']), frame_to_time(project.start, project.fps), new_no_bgm_recode, output_recode, stream_terminal=False)
-        output = config.output.with_stem(config.output.stem + '_recode')
-        # 硬链接到最终输出文件
-        output.unlink(missing_ok=True)
-        os.link(new_output_recode, output)
-        logger.info(f"✅ 重编码完成，输出文件: {output_recode}")
 
 
 def work_clips(config: ScriptConfig, rng: Range, seg_file: Path) -> Path:
@@ -650,10 +635,10 @@ def work_clips(config: ScriptConfig, rng: Range, seg_file: Path) -> Path:
             ]
         files = [new_seg_file, *text_files]
         new_seg_file_txt = cache_clip(cmd, files)
-        return new_seg_file_txt
+        return align_duration(new_seg_file_txt, config)
 
     pool.shutdown()
-    return new_seg_file
+    return align_duration(new_seg_file, config)
 
 
 def ensure_transparent(config: ScriptConfig) -> Path:
@@ -879,6 +864,51 @@ def cat_video(output: Path, segment_files: list[Path], config: ScriptConfig, par
     return cache_clip(cmd, segment_files, stream_terminal=stream_terminal)
 
 
+def align_duration(path: Path, config: ScriptConfig) -> Path:
+    """把整段的容器时长对齐到视频的精确时长
+
+    concat 分离器是按容器时长累加偏移的。段内音频比视频长十几毫秒，下一段就要晚十几毫秒
+    才开始，接缝处于是留下一个不到一帧的空档，成片会在那里定格一下。把音频 pad 或裁到
+    帧数乘上分母再除以分子，时长就精确了，最终拼接才能直接复制流而不再重编码。
+    """
+    frames = probe_video(path)[0]
+    num, denom = parse_fps(config.project.fps)
+    exact = Fraction(frames * denom, num)
+    target = path.with_stem(path.stem + '_aligned')
+    cmd = [
+        'ffmpeg', '-y', '-hide_banner',
+        '-i', path.as_posix(),
+        '-c:v', 'copy',
+        '-af', 'apad',
+        '-t', f'{float(exact):.9f}',
+        '-c:a', 'aac', '-b:a', '192k', '-ar', '44100', '-ac', '2',
+        target.as_posix(),
+    ]
+    return cache_clip(cmd, [path], stream_terminal=False)
+
+
+def cat_video_copy(output: Path, segment_files: list[Path], config: ScriptConfig, stream_terminal: bool = True) -> Path:
+    """用 concat 分离器直接复制流拼接，一帧画面都不用再编
+
+    前提是各段的容器时长都对齐过，见 align_duration。有一段没对齐，接缝处就会留下空档，
+    成片校验会当场报出来。
+    """
+    logger.info(f"🎥 直接复制拼接 {len(segment_files)} 个片段 → {output}")
+    content = ''.join(f"file '{seg.as_posix()}'\n" for seg in segment_files)
+    # 缓存签名只看命令不看清单内容，把清单摘要写进文件名，换了片段才不会命中旧结果
+    digest = hashlib.md5(content.encode()).hexdigest()[:6]
+    concat_file = config.cache_dir / f'{output.stem}_concat_{digest}.txt'
+    concat_file.write_text(content, encoding='utf-8')
+    cmd = [
+        'ffmpeg', '-y', '-hide_banner',
+        '-f', 'concat', '-safe', '0',
+        '-i', concat_file.as_posix(),
+        '-c', 'copy',
+        output.as_posix(),
+    ]
+    return cache_clip(cmd, segment_files, stream_terminal=stream_terminal)
+
+
 def measure_true_peak(path: Path) -> float:
     """用 loudnorm 测量音频真峰值，只读音频流，返回 dBTP"""
     cmd = [
@@ -971,7 +1001,6 @@ def add_bgm(bgm: Path, audio_advance_sec: float, input_path: Path, output_path: 
 @click.option('--font-file', default='SC-Heavy.otf', type=click.Path(path_type=Path), help='字体文件路径', show_default=True)
 @click.option('--cache-dir', default='cache_dir', type=click.Path(path_type=Path), help='缓存文件夹路径', show_default=True)
 @click.option('--output-dir', default='output_dir', type=click.Path(path_type=Path), help='输出文件夹路径', show_default=True)
-@click.option('--recode/--no-recode', default=False, help='额外输出一份重编码视频以提升兼容性', show_default=True)
 @click.option('--range', 'range_spec', default=None, help='只渲染指定的 Range，写法 3 或 3-5，1 起数，用于局部预览')
 @click.option('--min-font-ratio', default=0.03, type=float, help='字号相对屏高的下限，低于就告警', show_default=True)
 @click.option('--verify/--no-verify', default=True, help='把每个 clip 的首中末帧导出到校验目录', show_default=True)
@@ -982,7 +1011,6 @@ def cli(
     cache_dir: Path,
     output_dir: Path,
     font_file: Path,
-    recode: bool,
     range_spec: str,
     min_font_ratio: float,
     verify: bool,
@@ -994,7 +1022,6 @@ def cli(
         cache_dir=cache_dir,
         output_dir=output_dir,
         fontfile=font_file,
-        recode=recode,
         range_spec=range_spec,
         min_font_ratio=min_font_ratio,
         verify=verify,
