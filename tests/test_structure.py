@@ -314,6 +314,17 @@ def test_text_with_only_start_keeps_end_empty():
     assert (text.start, text.end) == (30, None)
 
 
+def test_text_escape_hatches_are_parsed():
+    project = parse_config(make_config(ranges=[
+        {'start': 0, 'end': 100,
+         'clips': [{'source': 'go1', 'start': 0, 'end': 100}],
+         'texts': [{'text': '爱音', 'drawtext': 'box=1', 'filters': 'gblur=sigma=4'}]},
+    ]))
+    text = project.ranges[0].texts[0]
+    assert text.drawtext == 'box=1'
+    assert text.filters == 'gblur=sigma=4'
+
+
 def test_clip_filters_is_parsed():
     project = parse_config(make_config(ranges=[
         {'start': 0, 'end': 100,

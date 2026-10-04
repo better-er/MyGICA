@@ -7,15 +7,18 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from PIL import Image
 
 from MyGICA.A_compiler import (
     ScriptConfig,
     TextLayer,
     align_duration,
     build_drawtext_filters,
+    build_layer_filter,
     build_reason_ass,
     cat_video_copy,
     check_frame,
+    check_layer_size,
     escape_ass_text,
     escape_filter_path,
     escape_toml_string,
@@ -349,17 +352,33 @@ def test_build_drawtext_falls_back_to_global_font():
     assert 'global.ttf' in out
 
 
-def test_build_drawtext_appends_extra_after_defaults():
+def test_build_drawtext_appends_drawtext_options_after_defaults():
     """自定义参数必须排在默认值之后，同名选项后者覆盖前者才能生效"""
     project = SimpleNamespace(colors={})
-    out = build_drawtext_filters([Text(text='测试', extra='box=1:boxborderw=10')], project, Path('g.ttf'))
+    out = build_drawtext_filters([Text(text='测试', drawtext='box=1:boxborderw=10')], project, Path('g.ttf'))
     assert out.endswith(':box=1:boxborderw=10')
 
 
-def test_build_drawtext_ignores_empty_extra():
+def test_build_drawtext_ignores_empty_options():
     project = SimpleNamespace(colors={})
     out = build_drawtext_filters([Text(text='测试')], project, Path('g.ttf'))
     assert out.endswith('shadowcolor=black@0.5')
+
+
+def test_build_layer_filter_puts_text_filters_after_drawtext():
+    project = SimpleNamespace(colors={})
+    plain = build_layer_filter(Text(text='测试'), project, Path('g.ttf'))
+    assert plain.startswith('drawtext=')
+    assert ',' not in plain, '单条字幕只该有一个滤镜'
+    out = build_layer_filter(Text(text='测试', filters='gblur=sigma=4'), project, Path('g.ttf'))
+    assert out == f'{plain},gblur=sigma=4'
+
+
+def test_check_layer_size_rejects_scaled_layer():
+    config = SimpleNamespace(video_width=1920, video_height=1080)
+    check_layer_size(Image.new('RGBA', (1920, 1080)), config, '甲')
+    with pytest.raises(ValueError, match='图层尺寸'):
+        check_layer_size(Image.new('RGBA', (1280, 720)), config, '甲')
 
 
 def test_probe_gaps_returns_empty_for_clean_video(tmp_path):

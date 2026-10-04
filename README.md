@@ -107,7 +107,8 @@ start = 2020
 end = 2098
 [[ranges.texts]]
 text = "火爆脾气一脚踢到钛合金"
-#extra = 'box=1:boxborderw=10'  # 可选，透传给 ffmpeg drawtext 的额外参数，写在后面可覆盖默认样式
+#drawtext = 'box=1:boxborderw=10'  # 可选，drawtext 自身的参数，写在后面可覆盖默认样式
+#filters = 'gblur=sigma=4'  # 可选，这一层字幕图的滤镜链，只作用在这一条字幕上
 #start = 0     # 可选，相对本 Range 起点的帧偏移，只在 [start, end) 里显示
 #end = 40      # 可选，开区间，只给一端时按另一端补齐
 [[ranges.clips]]
@@ -159,7 +160,7 @@ volume = -50
 
 ### 6. 字号下限告警
 
-`fontsize` 占视频高度的比例低于 `--min-font-ratio` 时打 warning，该参数默认 0.03，屏高 1080 下也就是字号低于 33 就告警。用 `extra` 顶掉 `fontsize` 的写法不参与这个检查，告警只看字段本身。
+`fontsize` 占视频高度的比例低于 `--min-font-ratio` 时打 warning，该参数默认 0.03，屏高 1080 下也就是字号低于 33 就告警。用 `drawtext` 顶掉 `fontsize` 的写法不参与这个检查，告警只看字段本身。
 
 ### 7. 校验帧导出
 
@@ -179,21 +180,31 @@ volume = -50
 
 `--font-file` 给整个工程定一种字体，某一段想换字体就在那个 `[[ranges.texts]]` 里写 `fontfile`，相对路径以项目根为基准，文件不存在会直接报错。亏损句用更重的字、标题句用手写体这类需求不用再拆工程。
 
-### 10. 文本样式可直接透传 drawtext 参数
+### 10. 文本样式：drawtext 参数与图层滤镜
 
-`Text` 只暴露了常用的那几个字段，剩下的 ffmpeg `drawtext` 选项用 `extra` 原样透传，写什么就是什么：
+`Text` 只暴露了常用的那几个字段，剩下的分两个口子往外接，一在 drawtext 之内，一在它之后。
+
+`drawtext` 接的是 **drawtext 自身的参数**，拼在默认值后面。ffmpeg 的同名选项后者覆盖前者，所以能直接顶掉默认的 `fontsize`、`fontcolor`、`shadowx`：
 
 ```toml
 [[ranges.texts]]
 text = "你咋可能玩过我"
-extra = "box=1:boxcolor=black@0.5:boxborderw=12"  # 垫一块半透明底板
+drawtext = "box=1:boxcolor=black@0.5:boxborderw=12"  # 垫一块半透明底板
 ```
 
-`extra` 拼在最后。ffmpeg 的同名选项后者覆盖前者，所以上面这种写法也能直接顶掉默认的 `fontsize`、`fontcolor`、`shadowx` 等等，默认样式不必改写。
+`filters` 接的是**这一层字幕图的滤镜链**，和 `Clip.filters` 一个意思，接在 drawtext 之后，只作用在这一条字幕上，同屏的别的字幕不受影响：
 
-`extra` 的值不做转义，里面带逗号时要么整段用单引号包住，要么写成 `\,`，否则逗号会被当成两个滤镜的分界。
+```toml
+[[ranges.texts]]
+text = "我玩的就是贷款仓"
+filters = "gblur=sigma=4"  # 这一句糊一点，让它在背景前退后
+```
 
-`extra` 里的颜色是 ffmpeg 的颜色，写 `0x00FF00`、`white`、`black@0.5` 这些，`colors` 表里的中文别名只对 `fontcolor` 字段生效，写进 `extra` 会因为 ffmpeg 不认识而直接报错。
+`filters` 不许改变图层尺寸。字幕图是整屏大小，缩放会让叠加错位，编译时直接报错。改帧数的滤镜也没有意义，一层只有一帧。
+
+`boxcolor` 的 `@透明度` 会被 ffmpeg 平方：写 `@0.6`，图层里拿到的是 RGB 已按 0.6 预乘、alpha 却只有 0.36，叠到画面上还要再乘一次，最终约等于 0.22。想要看着像半透明就往上写，`@0.8` 大约得到 0.5 的观感。
+
+两个字段的值都不做转义，里面带逗号时要么整段用单引号包住，要么写成 `\,`，否则逗号会被当成两个滤镜的分界。`drawtext` 里的颜色必须是 ffmpeg 认的颜色，写 `0x00FF00`、`white`、`black@0.5` 这些，`colors` 表里的中文别名只对 `fontcolor` 字段生效。
 
 > 天哪，这也太自动了！接下来就要自动生成 bug 了！
 

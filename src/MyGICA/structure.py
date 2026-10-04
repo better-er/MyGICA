@@ -58,8 +58,10 @@ class Text:
     shadowx: int = 0  # 阴影横向偏移，正数往右
     shadowy: int = 0  # 阴影纵向偏移，正数往下
     shadowcolor: str = 'black@0.5'  # 阴影颜色，支持 颜色@透明度
-    # 追加到 drawtext 末尾的额外参数，写在后面的同名参数会覆盖前面的默认值，想加默认没暴露的 box、alpha 等就写这里
-    extra: Optional[str] = None
+    # drawtext 自身的参数，接在 drawtext 末尾，写在后面的同名参数会覆盖前面的默认值，想开默认没暴露的 box、alpha 等就写这里
+    drawtext: Optional[str] = None
+    # 叠加在这一层字幕图上的滤镜链，和 Clip.filters 一个意思，接在 drawtext 之后，只影响这一条字幕
+    filters: Optional[str] = None
     align: Literal['center', 'upper left'] = 'center'
     start: Optional[int] = None  # 相对 Range 起点的帧偏移，留空表示从 Range 头开始显示
     end: Optional[int] = None  # 相对 Range 起点的帧偏移，开区间，留空表示显示到 Range 尾

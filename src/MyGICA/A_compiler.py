@@ -413,8 +413,8 @@ def build_drawtext_filters(
                 f"shadowcolor={txt.shadowcolor}",
             ]
         # 自定义参数排在最后，ffmpeg 同名选项后者覆盖前者，所以能盖掉上面的默认值
-        if txt.extra:
-            dt_args.append(txt.extra)
+        if txt.drawtext:
+            dt_args.append(txt.drawtext)
         filters.append(f"drawtext={':'.join(dt_args)}")
 
     return ",".join(filters)
@@ -694,19 +694,37 @@ def text_spans(texts: list[Text], length: int) -> list[tuple[int, int, Text]]:
     ]
 
 
+def build_layer_filter(text: Text, project: ProjectConfig, fontfile: Path) -> str:
+    """一层的滤镜串：drawtext 打底，Text.filters 接在它后面只作用在这一条字幕上"""
+    chain = build_drawtext_filters([text], project, fontfile=fontfile)
+    if text.filters:
+        chain = f'{chain},{text.filters}'
+    return chain
+
+
+def check_layer_size(image: Image.Image, config: ScriptConfig, label: str) -> None:
+    """图层尺寸必须和成片一致，Text.filters 里混进缩放会让叠加错位"""
+    check(
+        image.size == (config.video_width, config.video_height),
+        f"Text 的 filters 把图层尺寸改成了 {image.size}，叠加会错位：{label}",
+    )
+
+
 def render_text_layer(index: int, start: int, end: int, text: Text, transparent_path: Path, config: ScriptConfig) -> TextLayer:
     """把一条 Text 单独渲到透明底上，作为合成用的一层"""
-    drawtext_filter = build_drawtext_filters([text], config.project, fontfile=config.fontfile)
+    layer_filter = build_layer_filter(text, config.project, config.fontfile)
     target = config.cache_dir / f'layer_{index}.png'
     cmd = [
         "ffmpeg", "-y", "-hide_banner",
         "-i", transparent_path.as_posix(),
-        "-vf", drawtext_filter,
+        "-vf", layer_filter,
         '-frames:v', '1',
         '-update', '1',
         target.as_posix(),
     ]
     base = cache_clip(cmd, [transparent_path], stream_terminal=False)
+    with Image.open(base) as image:
+        check_layer_size(image, config, text.text)
     layer = TextLayer(label=text.text, start=start, end=end, base=base, names=get_blur(base))
     if layer.fade < FADE_FRAMES:
         logger.warning(f'字幕「{text.text}」只显示 {layer.span} 帧，淡入淡出压缩到 {layer.fade} 帧')
