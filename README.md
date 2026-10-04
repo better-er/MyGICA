@@ -220,6 +220,10 @@ filters = "gblur=sigma=4"  # 这一句糊一点，让它在背景前退后
 
 [日不落的爱音.MyGICA.mp4](https://www.bilibili.com/video/BV1KQa9zFE69)
 
+[千早不思议.MyGICA.toml](%E5%8D%83%E6%97%A9%E4%B8%8D%E6%80%9D%E8%AE%AE.MyGICA.toml)
+
+[千早不思议.MyGICA.mp4](https://www.bilibili.com/video/BV1P6a1zvEAs)
+
 ---
 
 ## ▶️ 使用方法

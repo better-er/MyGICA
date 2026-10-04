@@ -1,0 +1,560 @@
+# MyGICA v1.0 (TOML)
+
+fps = '24000/1001'
+#project_name = "千早不思议.mkv"
+project_suffix = '.mp4'
+# 使用自动推测
+#start = 11
+#start = 1907
+#start = 454
+#end = 2020
+
+# =====================================
+# 源文件定义
+# =====================================
+
+[sources]
+go1 = 'D:\qbitdownload\short\mygo\mygo1.mkv'
+go2 = 'D:\qbitdownload\short\mygo\mygo2.mkv'
+go3 = 'D:\qbitdownload\short\mygo\mygo3.mkv'
+go4 = 'D:\qbitdownload\short\mygo\mygo4.mkv'
+go5 = 'D:\qbitdownload\short\mygo\mygo5.mkv'
+go6 = 'D:\qbitdownload\short\mygo\mygo6.mkv'
+go7 = 'D:\qbitdownload\short\mygo\mygo7.mkv'
+go8 = 'D:\qbitdownload\short\mygo\mygo8.mkv'
+go9 = 'D:\qbitdownload\short\mygo\mygo9.mkv'
+go10 = 'D:\qbitdownload\short\mygo\mygo10.mkv'
+go11 = 'D:\qbitdownload\short\mygo\mygo11.mkv'
+go12 = 'D:\qbitdownload\short\mygo\mygo12.mkv'
+go13 = 'D:\qbitdownload\short\mygo\mygo13.mkv'
+
+ji1 = 'D:\qbitdownload\short\mujica\mujica1.mkv'
+ji2 = 'D:\qbitdownload\short\mujica\mujica2.mkv'
+ji3 = 'D:\qbitdownload\short\mujica\mujica3.mkv'
+ji4 = 'D:\qbitdownload\short\mujica\mujica4.mkv'
+ji5 = 'D:\qbitdownload\short\mujica\mujica5.mkv'
+ji6 = 'D:\qbitdownload\short\mujica\mujica6.mkv'
+ji7 = 'D:\qbitdownload\short\mujica\mujica7.mkv'
+ji8 = 'D:\qbitdownload\short\mujica\mujica8.mkv'
+ji9 = 'D:\qbitdownload\short\mujica\mujica9.mkv'
+ji10 = 'D:\qbitdownload\short\mujica\mujica10.mkv'
+ji11 = 'D:\qbitdownload\short\mujica\mujica11.mkv'
+ji12 = 'D:\qbitdownload\short\mujica\mujica12.mkv'
+ji13 = 'D:\qbitdownload\short\mujica\mujica13.mkv'
+
+black = 'cache_in\test_video_basic.mkv'
+# 由 0_gen_black.py 生成的测试视频
+
+bgm = 'D:\QQFile\2534666876\FileRecv\千早不思议_v3.wav'
+# 找个音频替换上面这个，默认需要这个文件存在
+
+san-anon = 'D:\Pictures\圣爱音.png'
+
+seg_1253 = 'cache_in\seg_1253.flac'
+seg_1907 = 'cache_in/seg_1907.341fd3_vocals.flac'
+
+# =====================================
+# 应援色定义
+# =====================================
+
+[colors]
+'灯' = '#77BBDD'
+'爱音' = '#FF8899'
+'乐奈' = '#77DD77'
+'素世' = '#FFDD88'
+'立希' = '#7777AA'
+'MyGO!!!!!' = '#3388BB'
+
+'初华' = '#BB9955'
+'睦' = '#779977'
+'海铃' = '#335566'
+'若麦' = '#AA4477'
+'祥子' = '#7799CC'
+'Ave Mujica' = '#881144'
+
+'tomori' = '#77BBDD'
+'anon' = '#FF8899'
+'rana' = '#77DD77'
+'soyo' = '#FFDD88'
+'taki' = '#7777AA'
+'mygo' = '#3388BB'
+
+'uika' = '#BB9955'
+'mutsumi' = '#779977'
+'umiri' = '#335566'
+'nyamu' = '#AA4477'
+'saki' = '#7799CC'
+'mujica' = '#881144'
+
+# =====================================
+# 时间范围与字幕/动作定义
+# =====================================
+
+[[ranges]]
+start = 11
+end = 454
+[[ranges.clips]]
+source = "NEXT"
+
+[[ranges]]
+start = 454
+end = 574
+[[ranges.texts]]
+text = '''千早不思议（使用MyGICA项目剪辑）
+填词：@鬼街穿堂风
+调音：@鬼街穿堂风
+剪辑：@不死の祥云
+　
+　
+'''
+[[ranges.clips]]
+source = "NEXT"
+
+[[ranges]]
+start = 574
+end = 672
+[[ranges.texts]]
+text = "千川随海鸥掠过长崎的海滨"
+[[ranges.texts]]
+text = "千　　　　　　　　　　　"
+fontcolor = 'anon'
+[[ranges.clips]]
+source = "go2"
+start = 845
+volume = -50
+
+[[ranges]]
+start = 672
+end = 755
+[[ranges.texts]]
+text = "早晨的风车旋开出岛的风情"
+[[ranges.texts]]
+text = "早　　　　　　　　　　　"
+fontcolor = 'anon'
+[[ranges.clips]]
+source = "go2"
+#start = 2929
+#start = 2545
+end = 2986
+volume = -50
+
+[[ranges]]
+start = 755
+end = 821
+[[ranges.texts]]
+text = "爱意穿过了飞利浦的耳机"
+[[ranges.texts]]
+text = "爱　　　　　　　　　　"
+fontcolor = 'anon'
+[[ranges.clips]]
+source = "go2"
+start = 17936
+
+[[ranges]]
+start = 821
+end = 869
+[[ranges.texts]]
+text = "因你更自信练习"
+[[ranges.texts]]
+text = "因　　　　　　"
+fontcolor = 'anon'
+#[[ranges.clips]]
+#source = "go4"
+#start = 28647
+[[ranges.clips]]
+source = "go6"
+start = 1343
+volume = -50
+
+[[ranges]]
+start = 869
+end = 958
+[[ranges.texts]]
+text = "我已经开始dreaming"
+[[ranges.clips]]
+source = "go5"
+end = 8667
+volume = -50
+
+[[ranges]]
+start = 958
+end = 1061
+[[ranges.texts]]
+text = "盛放的脚步回响在羽丘小径"
+[[ranges.texts]]
+text = "盛　　　　　　　　　　　"
+fontcolor = 'anon'
+[[ranges.clips]]
+source = "ji5"
+start = 26115
+volume = -50
+
+[[ranges]]
+start = 1061
+end = 1139
+[[ranges.texts]]
+text = "日本姥爷拦不住爱音东京"
+[[ranges.texts]]
+text = "日　　　　　　　　　　"
+fontcolor = 'anon'
+[[ranges.clips]]
+source = "ji5"
+start = 26409
+
+[[ranges]]
+start = 1139
+end = 1205
+[[ranges.texts]]
+text = "快门响起 我想起她演的戏"
+[[ranges.texts]]
+text = "快　　　 　　　　　　　"
+fontcolor = 'anon'
+#[[ranges.clips]]
+#source = "ji7"
+#start = 5458
+#[[ranges.clips]]
+#source = "ji7"
+#start = 5458
+[[ranges.clips]]
+source = "ji5"
+start = 21578
+
+[[ranges]]
+start = 1205
+end = 1253
+[[ranges.texts]]
+text = "乐队要少点重力"
+[[ranges.texts]]
+text = "乐　　　　　　"
+fontcolor = 'anon'
+[[ranges.clips]]
+source = "ji6"
+end = 31460
+
+[[ranges]]
+start = 1253
+end = 1337
+[[ranges.texts]]
+text = "用心唱 才有人听"
+[[ranges.clips]]
+source = "go7"
+end = 22582
+sound = "seg_1253"
+
+[[ranges]]
+start = 1337
+end = 1445
+[[ranges.texts]]
+text = "Chihaya不思议 突然的拉住你"
+[[ranges.clips]]
+source = "go2"
+start = 7378
+volume = -50
+
+[[ranges]]
+start = 1445
+end = 1493
+[[ranges.texts]]
+text = "长崎神社旁的狐狸"
+[[ranges.clips]]
+source = "ji7"
+start = 2311
+#[[ranges.clips]]
+#source = "go11"
+#start = 30598
+
+[[ranges]]
+start = 1493
+end = 1529
+[[ranges.texts]]
+text = "指引稻荷的神明"
+#[[ranges.clips]]
+#source = "ji12"
+#start = 31485
+
+[[ranges]]
+start = 1529
+end = 1635
+[[ranges.texts]]
+text = "Chihaya不思议 突然叫你soyorin"
+[[ranges.clips]]
+source = "go11"
+start = 16097
+#[[ranges.clips]]
+#source = 'san-anon'
+#start = 0
+
+[[ranges]]
+start = 1635
+end = 1711
+[[ranges.texts]]
+text = "别板着脸拉我去旅行"
+
+[[ranges]]
+start = 1711
+#end = 1918
+end = 1907
+
+[[ranges]]
+start = 1907
+#start = 1918
+end = 2020
+[[ranges.texts]]
+text = "追随着行星引力在宇宙逃逸"
+[[ranges.clips]]
+source = "go1"
+end = 29590
+sound = 'seg_1907'
+
+[[ranges]]
+start = 2020
+end = 2098
+[[ranges.texts]]
+text = "火爆脾气一脚踢到钛合金"
+[[ranges.clips]]
+source = "go1"
+start = 29590
+end = 29626
+[[ranges.clips]]
+source = "go1"
+start = 30852
+volume = -50
+
+[[ranges]]
+start = 2098
+end = 2165
+[[ranges.texts]]
+text = "想要放弃 却还是输给任性"
+[[ranges.clips]]
+source = "go10"
+start = 19217
+
+[[ranges]]
+start = 2165
+end = 2212
+[[ranges.texts]]
+text = "迎着风全速前进"
+
+[[ranges]]
+start = 2212
+end = 2296
+[[ranges.texts]]
+text = "迷失在MYGO森林"
+[[ranges.clips]]
+source = "go10"
+start = 20811
+
+[[ranges]]
+start = 2296
+end = 2404
+[[ranges.texts]]
+text = "Chihaya不思议 突然的追上你"
+[[ranges.clips]]
+source = "go6"
+start = 28664
+volume = -50
+
+[[ranges]]
+start = 2404
+end = 2452
+[[ranges.texts]]
+text = "强劲动力带大急停"
+
+[[ranges]]
+start = 2452
+end = 2488
+[[ranges.texts]]
+text = "只有轮胎不抓地"
+[[ranges.clips]]
+source = "go6"
+end = 29574
+volume = -10
+
+[[ranges]]
+start = 2488
+end = 2595
+[[ranges.texts]]
+text = "Chihaya不思议 突然听你叫迷星"
+[[ranges.clips]]
+source = "go12"
+end = 12009
+volume = -50
+
+[[ranges]]
+start = 2595
+end = 2686
+[[ranges.texts]]
+text = "水如碧天伴走出天晴"
+[[ranges.clips]]
+source = "go3"
+start = 1386
+volume = -50
+
+[[ranges]]
+start = 2686
+end = 2787
+[[ranges.texts]]
+text = "所以用C和弦 弹了情歌给你"
+#[[ranges.clips]]
+#source = "go6"
+#start = 1343
+#volume = -50
+#[[ranges.clips]]
+#source = "go4"
+#start = 28647
+[[ranges.clips]]
+source = "go4"
+start = 28290
+volume = -50
+
+[[ranges]]
+start = 2787
+end = 2896
+[[ranges.texts]]
+text = "温暖冒傻气 明亮又很安心"
+[[ranges.clips]]
+source = "go6"
+start = 1700
+volume = -50
+
+[[ranges]]
+start = 2896
+end = 3009
+[[ranges.texts]]
+text = "你知道我的节奏 调个皮"
+[[ranges.clips]]
+source = "ji13"
+end = 4363
+volume = -50
+
+[[ranges]]
+start = 3009
+end = 3126
+[[ranges.texts]]
+text = "我继续和观众游戏"
+[[ranges.clips]]
+source = "ji13"
+start = 6972
+volume = -50
+
+[[ranges]]
+start = 3126
+end = 3541
+
+[[ranges]]
+start = 3541
+end = 3698
+[[ranges.texts]]
+text = "Chihaya 喵~ 抢吉他主唱的劲敌"
+[[ranges.clips]]
+source = "go11"
+start = 8093
+volume = -50
+
+[[ranges]]
+start = 3698
+end = 3736
+[[ranges.texts]]
+text = "只是嘴馋小猫咪"
+
+[[ranges]]
+start = 3736
+end = 3926
+[[ranges.texts]]
+text = "Chihaya 我和海玲吉他比高音"
+[[ranges.clips]]
+source = "go9"
+start = 26576
+end = 26660
+volume = -50
+[[ranges.clips]]
+source = "go9"
+start = 25734
+#end = 25843
+
+[[ranges]]
+start = 3926
+end = 4034
+[[ranges.texts]]
+text = "Chihaya不思议 突然的遇见你"
+[[ranges.clips]]
+source = "go13"
+start = 13835
+
+[[ranges]]
+start = 4034
+end = 4082
+[[ranges.texts]]
+text = "聚光灯下的万人迷"
+[[ranges.clips]]
+source = "ji5"
+end = 6148
+volume = -50
+
+[[ranges]]
+start = 4082
+end = 4119
+[[ranges.texts]]
+text = "心里藏着小痴情"
+[[ranges.clips]]
+source = "ji5"
+end = 4969
+volume = -50
+
+[[ranges]]
+start = 4119
+end = 4226
+[[ranges.texts]]
+text = "Chihaya不思议 突然尝试靠近你"
+[[ranges.clips]]
+source = "ji6"
+end = 10407
+
+[[ranges]]
+start = 4226
+end = 4313
+[[ranges.texts]]
+text = "对我哈气也没有关系"
+
+[[ranges]]
+start = 4313
+end = 4466
+[[ranges.texts]]
+text = "Chihaya Oh yeah~ 积极打榜的小明星"
+[[ranges.clips]]
+source = "go11"
+start = 17540
+
+[[ranges]]
+start = 4466
+end = 4501
+[[ranges.texts]]
+text = "整活少咬打火机"
+
+[[ranges]]
+start = 4501
+end = 4607
+[[ranges.texts]]
+text = "Chihaya 不可思议"
+[[ranges.clips]]
+source = "go11"
+start = 30346
+
+[[ranges]]
+start = 4607
+end = 4705
+[[ranges.texts]]
+text = "我带着爱降临邦多利"
+
+[[ranges]]
+start = 4705
+end = 4779
+[[ranges.texts]]
+text = "我带着爱降临邦多利"
+[[ranges.clips]]
+source = "san-anon"
+start = 0
+
+[[ranges]]
+start = 4779
+end = 5050
